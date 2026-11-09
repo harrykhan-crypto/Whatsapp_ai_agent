@@ -242,7 +242,7 @@ class BrowserWorker:
 
     def __init__(self, profile_dir: Path, base_url: str, *, headless: bool = False,
                  timeout_ms: int = 45_000, start_url: str | None = None, executable_path: str = "",
-                 channel: str = ""):
+                 channel: str = "", cookie_file: Path | str | None = None):
         self.profile_dir = Path(profile_dir)
         self.base_url = base_url.rstrip("/")
         self.headless = headless
@@ -253,7 +253,7 @@ class BrowserWorker:
         # Moodle's login cookie is a *session* cookie, which Chromium does not keep
         # when it restarts. We keep a private copy (Moodle host only) so a restart or
         # crash does not force a new manual login while the server session is valid.
-        self.cookie_file = self.profile_dir.parent / f".{self.profile_dir.name}_session.json"
+        self.cookie_file = Path(cookie_file) if cookie_file else self.profile_dir.parent / f".{self.profile_dir.name}_session.json"
         self._cookie_snapshot = ""
         # (priority, sequence, job): user requests (0) run before background sync work (10).
         self._jobs: queue.PriorityQueue = queue.PriorityQueue()

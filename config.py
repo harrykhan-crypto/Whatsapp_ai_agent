@@ -35,6 +35,12 @@ def _list(name: str, default: str = "") -> list[str]:
     return [item.strip() for item in raw.split(",") if item.strip()]
 
 
+def resolve_path(value: str | Path) -> Path:
+    """Relative paths in .env are relative to the project folder."""
+    path = Path(value)
+    return path if path.is_absolute() else ROOT / path
+
+
 def _path(name: str, default: Path) -> Path:
     value = os.getenv(name)
     path = Path(value) if value else default
@@ -47,6 +53,10 @@ class Settings:
     moodle_url: str = field(default_factory=lambda: os.getenv("MOODLE_URL", "https://fall2026.auplmscs.com").rstrip("/"))
     profile_dir: Path = field(default_factory=lambda: _path("BROWSER_PROFILE_DIR", ROOT / "moodle_browser_profile"))
     headless: bool = field(default_factory=lambda: _bool("BROWSER_HEADLESS", False))
+    # Saved Moodle login (cookies). Default: next to the profile folder.
+    session_file: str = field(default_factory=lambda: os.getenv("SESSION_FILE", ""))
+    # true when HARRY runs on a cloud server (changes the "login needed" instructions)
+    server_mode: bool = field(default_factory=lambda: _bool("SERVER_MODE", False))
     browser_executable: str = field(default_factory=lambda: os.getenv("BROWSER_EXECUTABLE_PATH", ""))
     browser_channel: str = field(default_factory=lambda: os.getenv("BROWSER_CHANNEL", ""))  # e.g. "chrome" or "msedge"
     page_timeout_ms: int = field(default_factory=lambda: _int("PAGE_TIMEOUT_MS", 45_000))

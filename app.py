@@ -22,7 +22,7 @@ from functools import wraps
 
 from flask import Flask, abort, jsonify, request
 
-from config import Settings, settings as default_settings
+from config import Settings, resolve_path, settings as default_settings
 from database.db import Database
 from database.models import Repository
 from lms.browser import BrowserWorker
@@ -63,14 +63,15 @@ def build(settings: Settings = default_settings, *, messenger: Messenger | None 
     if with_browser:
         worker = BrowserWorker(settings.profile_dir, settings.moodle_url, headless=settings.headless,
                                timeout_ms=settings.page_timeout_ms, executable_path=settings.browser_executable,
-                               channel=settings.browser_channel)
+                               channel=settings.browser_channel,
+                               cookie_file=resolve_path(settings.session_file) if settings.session_file else None)
         lms = LmsService(worker, repo, download_dir=settings.download_dir,
                          max_download_bytes=settings.max_download_bytes)
     reports = ReportGenerator(repo)
     commands = CommandHandler(repo, lms, reports, stale_minutes=settings.stale_minutes,
-                              student_name=settings.student_name)
+                              student_name=settings.student_name, server_mode=settings.server_mode)
     messenger = messenger or build_messenger(settings, repo)
-    notifier = NotificationService(repo, messenger, reports, settings.reminder_hours)
+    notifier = NotificationService(repo, messenger, reports, settings.reminder_hours, server_mode=settings.server_mode)
     if lms is not None:
         lms.on_session_expired = notifier.session_expired
         lms.on_session_restored = notifier.session_restored

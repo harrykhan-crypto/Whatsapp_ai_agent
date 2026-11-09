@@ -49,12 +49,13 @@ class HandlerResult:
 
 class CommandHandler:
     def __init__(self, repo: Repository, lms: LmsService | None, reports: ReportGenerator, *,
-                 stale_minutes: int = 45, student_name: str = ""):
+                 stale_minutes: int = 45, student_name: str = "", server_mode: bool = False):
         self.repo = repo
         self.lms = lms
         self.reports = reports
         self.stale_minutes = stale_minutes
         self.student_name = student_name
+        self.server_mode = server_mode
 
     # ------------------------------------------------------------------ entry
     def handle(self, text: str, progress: Callable[[str], None] | None = None) -> HandlerResult:
@@ -68,7 +69,7 @@ class CommandHandler:
                      intent.pending_only, intent.want_files, intent.terms)
             self._dispatch(intent, result, progress)
         except SessionExpired:
-            result.text(SESSION_EXPIRED_TEXT)
+            result.text(self._login_text())
         except Exception:  # noqa: BLE001
             log.exception("Command failed: %r", text)
             result.text("⚠️ Sorry, something went wrong while reading your LMS. I've logged the error; please try again in a minute.")
@@ -103,7 +104,7 @@ class CommandHandler:
             progress("⏳ Checking your LMS now… this can take 1–3 minutes.")
             outcome = self.lms.sync(force_details=True) if self.lms else None
             if outcome and outcome.session_expired:
-                result.text(SESSION_EXPIRED_TEXT)
+                result.text(self._login_text())
             elif outcome and outcome.ok:
                 result.text(f"✅ LMS synced: {outcome.courses} courses, {outcome.activities} activities "
                             f"({outcome.new_activities} new, {outcome.changes} changes).")
@@ -168,6 +169,12 @@ class CommandHandler:
             )
 
     # ---------------------------------------------------------------- helpers
+    def _login_text(self) -> str:
+        if self.server_mode:
+            return ("🔐 *Moodle login needed*\n\nOn your laptop, double-click *LOGIN_AND_SEND.bat* and sign in to Moodle "
+                    "in the window that opens. HARRY on the server continues automatically.")
+        return SESSION_EXPIRED_TEXT
+
     def _meaningful_terms(self, terms: list[str]) -> list[str]:
         """Keep only words that appear in your activity or file names, so stray words never block an answer."""
         if not terms:
@@ -202,7 +209,7 @@ class CommandHandler:
                      "I'll answer as soon as it's done.")
             outcome = self.lms.sync()
             if outcome.session_expired:
-                result.text(SESSION_EXPIRED_TEXT)
+                result.text(self._login_text())
                 return False
             if not outcome.ok and self.lms.data_age_minutes() is None:
                 result.text(f"⚠️ I couldn't read your LMS yet: {outcome.error}")
@@ -210,8 +217,9 @@ class CommandHandler:
             return True
         if self.repo.get_pref("session_state") == "expired":
             self.lms.sync_in_background()   # notices automatically when you have logged in again
-            result.text("🔐 Your Moodle login has expired, so this is the last saved information. "
-                        "Log in again in the HARRY browser window on your PC.")
+            where = ("double-click LOGIN_AND_SEND.bat on your laptop" if self.server_mode
+                     else "log in again in the HARRY browser window on your PC")
+            result.text(f"🔐 Your Moodle login has expired, so this is the last saved information. To fix it, {where}.")
             return True
         if age > self.stale_minutes:
             self.lms.sync_in_background()

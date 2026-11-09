@@ -30,6 +30,12 @@ Before `CHECK_HARRY.bat`, send any message (e.g. `menu`) to your HARRY agent on 
 Keep the START_HARRY window and the Moodle browser window open (minimising is fine).
 To stop HARRY, close the START_HARRY window.
 
+## Run 24/7 for free (laptop off)
+
+See **[docs/FREE_24x7_SERVER.md](docs/FREE_24x7_SERVER.md)**: a free Oracle Cloud server, set up
+with `DEPLOY_TO_SERVER.bat`. When Moodle needs a new login, `LOGIN_AND_SEND.bat` on the laptop
+sends it to the server.
+
 ## Setup (Windows PowerShell, manual)
 
 ```powershell
