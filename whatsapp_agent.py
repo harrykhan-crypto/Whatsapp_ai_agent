@@ -1,156 +1,74 @@
+"""WhatsApp side of HARRY (WhatsApp Agent Platform via the `whagent` library).
 
-import os
-import requests
-from dotenv import load_dotenv
-from whagent import Agent
+The original bot forwarded every message to app.py over HTTP. Now the poll loop
+runs inside app.py's process, so scheduled notifications and replies share one
+WhatsApp client (the platform allows only one poller per API key).
 
-load_dotenv()
+    python app.py              # recommended: starts everything
+    python whatsapp_agent.py   # same thing, kept for backwards compatibility
+"""
 
-token = os.getenv("WHATSAPP_AGENT_API_KEY")
+from __future__ import annotations
 
-if not token:
-    raise SystemExit("WHATSAPP_AGENT_API_KEY is missing from .env")
+import logging
+import threading
 
-agent = Agent(token)
-students = {}
-
-MENU = (
-    "HARRY - SMART UNIVERSITY ASSISTANT\n\n"
-    "1. My Courses\n"
-    "2. Assignments Due Today\n"
-    "3. Quizzes\n"
-    "4. Weekly Assignment Summary\n"
-    "5. Course Announcements\n\n"
-    "You can also ask naturally:\n"
-    "- What assignments are due tomorrow?\n"
-    "- Show overdue assignments\n"
-    "- Show my Automata Theory assignments\n"
-    "- What quizzes do I have?\n\n"
-    "Type MENU to return here."
-)
-
-OPTIONS = {
-    "1": "courses",
-    "courses": "courses",
-    "my courses": "courses",
-    "2": "assignments due today",
-    "assignments": "assignments due today",
-    "assignments due today": "assignments due today",
-    "3": "quizzes",
-    "quiz": "quizzes",
-    "quizzes": "quizzes",
-    "4": "weekly summary",
-    "weekly summary": "weekly summary",
-    "weekly assignment summary": "weekly summary",
-    "5": "announcements",
-    "announcements": "announcements",
-    "course announcements": "announcements",
-}
+log = logging.getLogger(__name__)
 
 
-def ask_moodle(question):
-    response = requests.post(
-        "http://127.0.0.1:5000/ask",
-        json={"question": question},
-        timeout=180
-    )
-    response.raise_for_status()
+def run_poller(container, stop: threading.Event) -> None:
+    from whagent import Agent, FileOffsetStore
+    from whagent.errors import AuthenticationError, PollReplacedError
 
-    data = response.json()
-    return data.get("answer", "HARRY received no answer from Moodle.")
+    messenger = container.messenger
+    offset_file = container.settings.database_path.parent / "whatsapp_offset.txt"
+    agent = Agent(client=messenger.client, typing=True, start="new", offset_store=FileOffsetStore(offset_file))
 
+    @agent.on_text
+    def on_text(ctx):
+        # Remember the recipient so scheduled notifications can reach you after a restart.
+        container.repo.set_pref("agent_recipient", ctx.sender)
+        container.messages.handle_inbound(ctx.sender, ctx.text or "", ctx.message.id)
 
-def send_answer(ctx, answer):
-    answer = str(answer).strip()
+    @agent.on_media
+    def on_media(ctx):
+        if ctx.text:  # a caption works like a text command
+            container.messages.handle_inbound(ctx.sender, ctx.text, ctx.message.id)
 
-    if not answer:
-        ctx.reply("Moodle returned an empty response.")
-        return
+    @agent.on_status
+    def on_status(status):
+        if getattr(status, "status", "") == "failed":
+            log.warning("WhatsApp reported a failed delivery for message %s", getattr(status, "id", "?"))
 
-    limit = 3000
-    chunks = []
+    @agent.on_error
+    def on_error(error, ctx):
+        log.error("WhatsApp handler error: %s", error)
+        if ctx is not None:
+            try:
+                ctx.reply("⚠️ Sorry, something went wrong. Please try again.")
+            except Exception:  # noqa: BLE001
+                pass
 
-    while len(answer) > limit:
-        cut = answer.rfind("\n", 0, limit)
-
-        if cut < limit // 2:
-            cut = answer.rfind(" ", 0, limit)
-
-        if cut < limit // 2:
-            cut = limit
-
-        chunks.append(answer[:cut].strip())
-        answer = answer[cut:].strip()
-
-    if answer:
-        chunks.append(answer)
-
-    for index, chunk in enumerate(chunks, start=1):
-        if len(chunks) > 1:
-            chunk = f"PART {index}/{len(chunks)}\n\n{chunk}"
-
-        ctx.reply(chunk)
-
-
-@agent.on_text
-def handle_message(ctx):
-    message = (ctx.text or "").strip()
-    key = message.lower()
-
-    sender = str(
-        getattr(ctx, "sender", None)
-        or getattr(ctx, "from_number", None)
-        or "default"
-    )
-
-    state = students.setdefault(
-        sender,
-        {"stage": "name", "name": ""}
-    )
-
-    if not message:
-        ctx.reply("Please send a message.")
-        return
-
-    if key in {"start", "restart"}:
-        students[sender] = {"stage": "name", "name": ""}
-        ctx.reply("Welcome to HARRY!\n\nPlease enter your full name.")
-        return
-
-    if key in {"menu", "help"}:
-        if not state["name"]:
-            state["stage"] = "name"
-            ctx.reply("Welcome to HARRY!\n\nPlease enter your full name.")
-        else:
-            state["stage"] = "menu"
-            ctx.reply(MENU)
-        return
-
-    if state["stage"] == "name":
-        state["name"] = message
-        state["stage"] = "menu"
-        ctx.reply(f"Welcome, {message}!\n\n{MENU}")
-        return
-
-    if key in {"hi", "hello", "salam", "assalamualaikum"}:
-        ctx.reply(f"Hello, {state['name']}!\n\n{MENU}")
-        return
-
-    question = OPTIONS.get(key, message)
-
-    ctx.reply("HARRY is checking Moodle. Please wait...")
-
-    try:
-        answer = ask_moodle(question)
-        send_answer(ctx, answer)
-
-    except requests.RequestException as error:
-        print("Moodle connection error:", repr(error))
-        ctx.reply(
-            "I couldn't connect to the Moodle reader. "
-            "Please check that app.py is running."
-        )
+    backoff = 5
+    log.info("WhatsApp Agent Platform poller started")
+    while not stop.is_set():
+        try:
+            agent.run(stop=stop.is_set)
+            backoff = 5
+        except AuthenticationError:
+            log.error("WhatsApp Agent API key was rejected. Check WHATSAPP_AGENT_API_KEY in .env.")
+            stop.wait(300)
+        except PollReplacedError:
+            log.error("Another program is polling with the same WhatsApp API key "
+                      "(is an old whatsapp_agent.py still running?). Retrying in 60s.")
+            stop.wait(60)
+        except Exception as error:  # noqa: BLE001 - network errors etc.
+            log.warning("WhatsApp polling error: %s; retrying in %ss", error, backoff)
+            stop.wait(backoff)
+            backoff = min(backoff * 2, 300)
 
 
-print("Starting HARRY Smart University Assistant...")
-agent.run()
+if __name__ == "__main__":
+    from app import main
+
+    main()

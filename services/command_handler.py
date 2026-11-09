@@ -1,0 +1,375 @@
+"""Turns a WhatsApp message into answers built from real LMS data."""
+
+from __future__ import annotations
+
+import logging
+import re
+from dataclasses import dataclass, field
+from typing import Callable
+
+from database.models import Activity, Repository
+from lms.authentication import SessionExpired
+from lms.file_downloader import DownloadError
+from services import intent as nlu
+from services.monitoring import LmsService
+from services.report_generator import ReportGenerator
+from timeutil import now
+from whatsapp.formatter import HELP, MENU
+
+log = logging.getLogger(__name__)
+
+MAX_FILES_PER_REQUEST = 10
+SESSION_EXPIRED_TEXT = (
+    "🔐 *Moodle login needed*\n\nYour LMS session has expired. Please open the HARRY browser window on your "
+    "computer, sign in to Moodle yourself (HARRY never asks for your password), then send /sync."
+)
+
+
+@dataclass
+class Reply:
+    kind: str                      # text | document | menu
+    text: str = ""
+    path: str = ""
+    filename: str = ""
+    mime_type: str | None = None
+    caption: str | None = None
+
+
+@dataclass
+class HandlerResult:
+    replies: list[Reply] = field(default_factory=list)
+
+    def text(self, body: str) -> None:
+        self.replies.append(Reply("text", text=body))
+
+    @property
+    def combined_text(self) -> str:
+        return "\n\n".join(r.text or f"[document] {r.filename}" for r in self.replies)
+
+
+class CommandHandler:
+    def __init__(self, repo: Repository, lms: LmsService | None, reports: ReportGenerator, *,
+                 stale_minutes: int = 45, student_name: str = ""):
+        self.repo = repo
+        self.lms = lms
+        self.reports = reports
+        self.stale_minutes = stale_minutes
+        self.student_name = student_name
+
+    # ------------------------------------------------------------------ entry
+    def handle(self, text: str, progress: Callable[[str], None] | None = None) -> HandlerResult:
+        result = HandlerResult()
+        progress = progress or (lambda _msg: None)
+        try:
+            intent = nlu.parse(text, self.repo.courses())
+            log.info("Intent: action=%s period=%s cats=%s course=%s pending=%s files=%s terms=%s",
+                     intent.action, intent.period, intent.categories, intent.course_name,
+                     intent.pending_only, intent.want_files, intent.terms)
+            self._dispatch(intent, result, progress)
+        except SessionExpired:
+            result.text(SESSION_EXPIRED_TEXT)
+        except Exception:  # noqa: BLE001
+            log.exception("Command failed: %r", text)
+            result.text("⚠️ Sorry, something went wrong while reading your LMS. I've logged the error; please try again in a minute.")
+        return result
+
+    # --------------------------------------------------------------- dispatch
+    def _dispatch(self, intent: nlu.Intent, result: HandlerResult, progress) -> None:
+        action = intent.action
+        if action in {"menu"}:
+            result.replies.append(Reply("menu", text=MENU))
+            return
+        if action == "help":
+            result.text(HELP)
+            return
+        if action == "greeting":
+            result.text(f"{self._greeting(intent)}\n\nHow can I help? Here is the menu 👇")
+            result.replies.append(Reply("menu", text=MENU))
+            return
+        if action == "unknown_command":
+            result.text("I don't know that command. Send /help to see everything I can do.")
+            return
+        if action == "status":
+            result.text(self._status())
+            return
+        if action == "notify":
+            result.text(self._notify(intent.argument))
+            return
+        if action == "history":
+            result.text(self._history())
+            return
+        if action == "sync":
+            progress("⏳ Checking your LMS now… this can take 1–3 minutes.")
+            outcome = self.lms.sync(force_details=True) if self.lms else None
+            if outcome and outcome.session_expired:
+                result.text(SESSION_EXPIRED_TEXT)
+            elif outcome and outcome.ok:
+                result.text(f"✅ LMS synced: {outcome.courses} courses, {outcome.activities} activities "
+                            f"({outcome.new_activities} new, {outcome.changes} changes).")
+            else:
+                result.text(f"⚠️ LMS sync failed: {outcome.error if outcome else 'LMS reader is not running'}")
+            return
+
+        # Everything below reads LMS data: make sure it is fresh enough.
+        if not self._ensure_fresh(result, progress):
+            return
+        greeting = self._greeting(intent) if intent.greeting else ""
+        if intent.ambiguous_courses and not intent.course_id:
+            names = ", ".join(n.split(" (", 1)[0] for n in intent.ambiguous_courses)
+            result.text(f"ℹ️ Several courses match ({names}). I'm showing all of them — mention the course more specifically to narrow it.")
+
+        simple = {
+            "today": dict(period="today"), "tomorrow": dict(period="tomorrow"), "upcoming": dict(period="upcoming"),
+            "week": dict(period="week"), "next_week": dict(period="next_week"),
+            "assignments": dict(categories=["assignment"]), "quizzes": dict(categories=["quiz"], period="upcoming"),
+            "labs": dict(categories=["lab"]), "tasks": dict(categories=["task"]), "pending": dict(pending_only=True),
+        }
+        if action in simple:
+            options = {"period": None, "categories": [], "pending_only": False, **simple[action]}
+            result.text(self.reports.answer(course_id=intent.course_id, course_name=intent.course_name,
+                                            greeting=greeting, **options))
+        elif action == "overdue":
+            result.text(self.reports.overdue(intent.course_id))
+        elif action == "courses":
+            result.text(self.reports.courses())
+        elif action == "report":
+            result.text(self.reports.full_report(greeting=greeting))
+        elif action == "announcements":
+            result.text(self.reports.announcements(intent.course_id))
+        elif action == "grades":
+            result.text(self.reports.grades())
+        elif action == "files":
+            result.text(self._files_list(intent.course_id))
+        elif action == "download":
+            self._download(intent, result, progress)
+        elif action == "query":
+            if intent.terms or intent.numbers:
+                matches = self._search_activities(intent, categories=intent.categories or None)
+                if matches and not intent.period:
+                    title = "🔎 *Matching LMS activities*"
+                    from whatsapp.formatter import format_list
+                    result.text((greeting + "\n\n" if greeting else "") + format_list(title, matches[:10], empty=""))
+                    return
+            result.text(self.reports.answer(
+                period=intent.period, categories=intent.categories, course_id=intent.course_id,
+                course_name=intent.course_name, pending_only=intent.pending_only, greeting=greeting,
+            ))
+        else:
+            result.text(
+                "🤔 I didn't understand that. Try:\n• _Kal kya submit karna hai?_\n• _Next week ke quizzes batao_\n"
+                "• _Send me HCI assignment 2_\n\nOr send /menu."
+            )
+
+    # ---------------------------------------------------------------- helpers
+    def _greeting(self, intent: nlu.Intent) -> str:
+        name = f" {self.student_name}" if self.student_name else ""
+        if re.search(r"assalam|salam|aoa", intent.raw, re.I):
+            return f"Wa Alaikum Assalam{name}! 👋"
+        return f"Hello{name}! 👋"
+
+    def _ensure_fresh(self, result: HandlerResult, progress) -> bool:
+        if self.lms is None:
+            return True
+        if self.repo.get_pref("session_state") == "expired":
+            # Try once: the student may have logged in again since.
+            progress("⏳ Re-checking your Moodle login…")
+            outcome = self.lms.sync()
+            if not outcome.ok:
+                result.text(SESSION_EXPIRED_TEXT if outcome.session_expired else f"⚠️ LMS sync failed: {outcome.error}")
+                return False
+            return True
+        age = self.lms.data_age_minutes()
+        if age is None or age > self.stale_minutes:
+            progress("⏳ Checking your LMS for the latest information… (1–3 minutes)")
+            outcome = self.lms.sync()
+            if outcome.session_expired:
+                result.text(SESSION_EXPIRED_TEXT)
+                return False
+            if not outcome.ok and age is None:
+                result.text(f"⚠️ I couldn't read your LMS yet: {outcome.error}")
+                return False
+            if not outcome.ok:
+                result.text("⚠️ The LMS could not be refreshed just now; showing the last saved information.")
+        return True
+
+    def _status(self) -> str:
+        last = self.repo.last_sync(ok_only=False)
+        ok = self.repo.last_sync()
+        c = self.reports.counts()
+        lines = ["🩺 *HARRY STATUS*", ""]
+        session = self.repo.get_pref("session_state") or "unknown"
+        lines.append(f"🔐 Moodle session: {'✅ signed in' if session == 'ok' else '❌ expired — please sign in' if session == 'expired' else '❔ not checked yet'}")
+        if self.lms is not None:
+            lines.append(f"🌐 Browser: {'✅ running' if self.lms.worker.alive else '❌ not running'}"
+                         f"{' (syncing now)' if self.lms.syncing else ''}")
+        if ok:
+            lines.append(f"🔄 Last successful sync: {ok['finished_at'][:16].replace('T', ' ')}")
+        if last and not last["ok"]:
+            lines.append(f"⚠️ Last attempt failed: {(last['error'] or '')[:150]}")
+        lines.append(f"📚 Courses: {len(self.repo.courses())}")
+        lines.append(f"📋 Tracked activities: {c['total']} (pending {c['pending']}, overdue {c['overdue']}, done {c['completed']})")
+        lines.append(f"🔔 Notifications: {'on' if self.repo.get_pref('notifications', 'on') == 'on' else 'off'}")
+        return "\n".join(lines)
+
+    def _notify(self, argument: str) -> str:
+        value = argument.strip().lower()
+        if value in {"on", "off"}:
+            self.repo.set_pref("notifications", value)
+            return f"🔔 Automatic notifications turned *{value}*."
+        state = self.repo.get_pref("notifications", "on")
+        return f"🔔 Automatic notifications are *{state}*. Send /notify on or /notify off."
+
+    def _history(self) -> str:
+        rows = self.repo.notification_history(10)
+        if not rows:
+            return "No notifications sent yet."
+        return "🧾 *Recent notifications*\n\n" + "\n".join(
+            f"• {r['created_at'][:16].replace('T', ' ')} — {r['kind']} ({r['status']})" for r in rows)
+
+    # ------------------------------------------------------------------ files
+    def _files_list(self, course_id: int | None) -> str:
+        files = self.repo.all_files(course_id)
+        if not files:
+            return "📂 No downloadable files were found on your LMS course pages."
+        lines, current = ["📂 *AVAILABLE LMS FILES*", "Send /download <code> to receive a file, e.g. /download F%s" % files[0]["id"]], None
+        shown = 0
+        for f in files:
+            if shown >= 60:
+                lines.append(f"\n…and {len(files) - shown} more. Add a course name, e.g. /files HCI")
+                break
+            course = (f.get("course_name") or "Course").split(" (", 1)[0]
+            if course != current:
+                lines.append(f"\n📘 *{course}*")
+                current = course
+            lines.append(f"F{f['id']} · {f['filename']}" + (f"  _({f['activity_name']})_" if f.get("activity_name") else ""))
+            shown += 1
+        return "\n".join(lines)
+
+    def _search_activities(self, intent: nlu.Intent, categories=None) -> list[Activity]:
+        found = self._search(intent.terms, intent.numbers, intent.course_id, categories)
+        if not found and intent.terms and (intent.numbers or intent.course_id):
+            # Unrecognised words should not hide an otherwise clear match ("HCI assignment 2 plzz").
+            found = self._search([], intent.numbers, intent.course_id, categories)
+        return found
+
+    def _search(self, terms: list[str], numbers: list[str], course_id: int | None, categories=None) -> list[Activity]:
+        cats = categories or ["assignment", "quiz", "lab", "task", "resource"]
+        items = self.repo.activities(categories=cats, course_id=course_id, with_files=True)
+        scored = []
+        for a in items:
+            haystack = f"{a.name} {' '.join(f['filename'] for f in a.files)}".lower()
+            name_numbers = {str(int(n)) for n in re.findall(r"\d+", a.name)}
+            score = 0
+            if numbers:
+                if not any(n in name_numbers for n in numbers):
+                    continue
+                score += 3
+            term_score = 0
+            for term in terms:
+                if term in haystack:
+                    term_score += 2
+                elif len(term) >= 4 and any(w.startswith(term[:4]) for w in re.findall(r"[a-z]+", haystack)):
+                    term_score += 1
+            if terms and term_score == 0:
+                continue
+            score += term_score
+            scored.append((score, a))
+        if not scored:
+            return []
+        top = max(s for s, _ in scored)
+        best = [a for s, a in scored if s == top]
+        best.sort(key=lambda a: (a.done, a.deadline is None, a.deadline or now()), reverse=False)
+        return best
+
+    def _download(self, intent: nlu.Intent, result: HandlerResult, progress) -> None:
+        argument = intent.argument.strip()
+        code = re.fullmatch(r"[fF]?(\d+)", argument) if argument else None
+        if code:
+            record = self.repo.file(int(code.group(1)))
+            if not record:
+                result.text(f"❌ There is no file with code {argument}. Send /files to see the codes.")
+                return
+            self._send_files([record], result, progress, intro=f"Found *{record['filename']}*.")
+            return
+
+        categories = [c for c in intent.categories] or None
+        specific = bool(intent.terms or intent.numbers)
+        if intent.pending_only or intent.overdue_only:
+            activities = self.reports.select(categories=categories, course_id=intent.course_id,
+                                             pending_only=True, overdue_only=intent.overdue_only)
+            label = "pending " + (" & ".join(categories) if categories else "activities")
+        elif specific:
+            search_cats = categories + ["resource"] if categories else None
+            activities = self._search_activities(intent, categories=search_cats)
+            label = "matching activities"
+        elif intent.course_id:
+            activities = [a for a in self.reports.select(categories=categories, course_id=intent.course_id, pending_only=True)]
+            label = f"pending work in {intent.course_name}"
+            if not any(self.repo.files_for_activity(a.id) for a in activities):
+                result.text(f"ℹ️ No pending {intent.course_name} activity has an attached file. Here are all its files:\n\n"
+                            + self._files_list(intent.course_id))
+                return
+        else:
+            result.text("📂 Which file do you need? Mention the course or activity, e.g. _Send HCI Assignment 2_.\n\n"
+                        + self._files_list(None))
+            return
+
+        if not activities:
+            where = f" in {intent.course_name}" if intent.course_name else ""
+            result.text(f"❌ I couldn't find any {label}{where} on your LMS. Send /files to see every available file.")
+            return
+
+        files: list[dict] = []
+        empty: list[Activity] = []
+        for a in activities[:15]:
+            found = self.repo.files_for_activity(a.id)
+            if not found and self.lms is not None:
+                try:
+                    self.lms.refresh_activity_files(a)   # the teacher may have just uploaded it
+                    found = self.repo.files_for_activity(a.id)
+                except SessionExpired:
+                    raise
+                except Exception as error:  # noqa: BLE001
+                    log.info("Could not refresh files for %s: %s", a.name, error)
+            if found:
+                for f in found:
+                    f["activity_name"], f["course_name"] = a.name, a.course_name
+                files.extend(found)
+            else:
+                empty.append(a)
+
+        if not files:
+            names = "\n".join(f"• {a.short_course} — {a.name}" for a in activities[:8])
+            result.text(f"📭 Found {len(activities)} {label}, but no files are attached to them on the LMS:\n{names}")
+            return
+        if len(files) > MAX_FILES_PER_REQUEST:
+            result.text(f"ℹ️ {len(files)} files matched; sending the first {MAX_FILES_PER_REQUEST}. Send /files for the full list.")
+            files = files[:MAX_FILES_PER_REQUEST]
+        if len(activities) == 1:
+            a = activities[0]
+            intro = f"✅ Found *{a.short_course} — {a.name}*. Sending {len(files)} file{'s' if len(files) != 1 else ''}…"
+        else:
+            intro = f"✅ Sending {len(files)} file{'s' if len(files) != 1 else ''} from {label}…"
+        self._send_files(files, result, progress, intro=intro)
+        if empty and len(activities) > 1:
+            result.text("ℹ️ No attachment on LMS for: " + ", ".join(f"{a.short_course} — {a.name}" for a in empty[:6]))
+
+    def _send_files(self, files: list[dict], result: HandlerResult, progress, intro: str) -> None:
+        result.text(intro)
+        failures = []
+        for f in files:
+            try:
+                info = self.lms.download_file(f["id"]) if self.lms else None
+                if not info:
+                    raise DownloadError("LMS reader is not running.")
+                course = (f.get("course_name") or info.get("course") or "").split(" (", 1)[0]
+                caption = f"📎 {course} — {f.get('activity_name') or info.get('activity') or ''}".strip(" —")
+                result.replies.append(Reply("document", path=info["path"], filename=info["filename"],
+                                            mime_type=info.get("mime_type"), caption=caption))
+            except SessionExpired:
+                raise
+            except Exception as error:  # noqa: BLE001
+                log.warning("Download failed for %s: %s", f.get("filename"), error)
+                failures.append(f"{f.get('filename')}: {error}")
+        if failures:
+            result.text("⚠️ Some files could not be downloaded:\n" + "\n".join(f"• {x}" for x in failures))
