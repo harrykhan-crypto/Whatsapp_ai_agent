@@ -11,6 +11,7 @@ saved there keeps working. Nothing here ever deletes or resets that profile.
 
 from __future__ import annotations
 
+import itertools
 import json
 import logging
 import os
@@ -38,6 +39,21 @@ _DEAD_BROWSER_MARKERS = (
     "not connected",
     "crashed",
 )
+
+
+PRIORITY_USER = 0
+PRIORITY_BACKGROUND = 10
+_BLOCKED_TYPES = {"image", "font", "media"}
+
+
+def _block_heavy_resources(route) -> None:
+    try:
+        if route.request.resource_type in _BLOCKED_TYPES:
+            route.abort()
+        else:
+            route.continue_()
+    except Exception:  # noqa: BLE001 - page may have navigated away
+        pass
 
 
 class BrowserUnavailable(RuntimeError):
@@ -92,7 +108,7 @@ class BrowserSession:
             pass
         except PlaywrightError:
             pass
-        self.page.wait_for_timeout(300)
+        self.page.wait_for_timeout(120)
 
     @property
     def url(self) -> str:
@@ -239,7 +255,9 @@ class BrowserWorker:
         # crash does not force a new manual login while the server session is valid.
         self.cookie_file = self.profile_dir.parent / f".{self.profile_dir.name}_session.json"
         self._cookie_snapshot = ""
-        self._jobs: queue.Queue = queue.Queue()
+        # (priority, sequence, job): user requests (0) run before background sync work (10).
+        self._jobs: queue.PriorityQueue = queue.PriorityQueue()
+        self._seq = itertools.count()
         self._thread: threading.Thread | None = None
         self._ready = threading.Event()
         self._stopping = threading.Event()
@@ -263,7 +281,7 @@ class BrowserWorker:
 
     def stop(self) -> None:
         self._stopping.set()
-        self._jobs.put(None)
+        self._jobs.put((-1, next(self._seq), None))
         if self._thread:
             self._thread.join(timeout=30)
 
@@ -271,16 +289,16 @@ class BrowserWorker:
     def alive(self) -> bool:
         return bool(self._thread and self._thread.is_alive() and self._session is not None)
 
-    def submit(self, fn: Callable[[BrowserSession], T]) -> Future:
+    def submit(self, fn: Callable[[BrowserSession], T], priority: int = PRIORITY_USER) -> Future:
         future: Future = Future()
         if self._stopping.is_set():
             future.set_exception(BrowserUnavailable("Browser is shutting down."))
             return future
-        self._jobs.put((fn, future))
+        self._jobs.put((priority, next(self._seq), (fn, future)))
         return future
 
-    def call(self, fn: Callable[[BrowserSession], T], timeout: float = 900) -> T:
-        return self.submit(fn).result(timeout=timeout)
+    def call(self, fn: Callable[[BrowserSession], T], timeout: float = 900, priority: int = PRIORITY_USER) -> T:
+        return self.submit(fn, priority).result(timeout=timeout)
 
     # -- internals (browser thread only) ------------------------------------
     def _launch(self) -> None:
@@ -300,6 +318,11 @@ class BrowserWorker:
         self._context = self._playwright.chromium.launch_persistent_context(**options)
         self._context.set_default_timeout(self.timeout_ms)
         self._restore_cookies()
+        # Images, fonts and media are not needed to read Moodle: skipping them makes pages load much faster.
+        try:
+            self._context.route("**/*", _block_heavy_resources)
+        except Exception as error:  # noqa: BLE001
+            log.debug("Resource blocking unavailable: %s", error)
         page = self._context.pages[0] if self._context.pages else self._context.new_page()
         self._session = BrowserSession(self._context, page, self.base_url, self.timeout_ms)
         self.started_at = time.time()
@@ -384,7 +407,7 @@ class BrowserWorker:
             self._ready.set()
 
         while True:
-            job = self._jobs.get()
+            _priority, _seq, job = self._jobs.get()
             if job is None:
                 break
             fn, future = job
@@ -419,6 +442,14 @@ class BrowserWorker:
                 self.last_error = str(error)
                 future.set_exception(error)
 
+        # Fail any jobs still queued so their callers don't wait forever.
+        while True:
+            try:
+                _p, _s, leftover = self._jobs.get_nowait()
+            except queue.Empty:
+                break
+            if leftover is not None:
+                leftover[1].set_exception(BrowserUnavailable("Browser stopped."))
         self.save_cookies()
         self._close_context()
         try:

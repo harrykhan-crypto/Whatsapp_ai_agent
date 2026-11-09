@@ -201,8 +201,10 @@ def parse(text: str, courses: list[dict] | None = None) -> Intent:
         intent.period = "next_week" if _next_before_week(tokens) else "week"
     if token_set & MONTH:
         intent.period = "month"
-    if "upcoming" in token_set and not intent.period:
+    if not intent.period and (token_set & {"upcoming", "coming", "aane", "aanay", "anay", "agle", "aglay", "future"} or "coming up" in norm):
         intent.period = "upcoming"
+    if not intent.period and token_set & {"soon", "jald", "jaldi", "near"}:
+        intent.period = "week"
 
     # Categories.
     if token_set & ASSIGNMENT:

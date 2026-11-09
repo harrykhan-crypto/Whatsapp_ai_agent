@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Iterable
 
 from database.db import Database
@@ -272,9 +272,13 @@ class Repository:
             return True
         age_hours = (now() - checked).total_seconds() / 3600
         deadline = from_iso(row["due_at"] or row["closes_at"])
-        # Past and finished work changes rarely: refresh once a day.
-        if deadline and deadline < now() and (row["status"] or "") in DONE_STATUSES:
+        done = (row["status"] or "") in DONE_STATUSES
+        # Finished work changes rarely (grades only): once a day.
+        if done:
             return age_hours >= 24
+        # Far-away deadlines: every 6 hours. Due soon, overdue or unknown: every sync.
+        if deadline and deadline > now() + timedelta(days=14):
+            return age_hours >= max(6, max_age_hours)
         return age_hours >= max_age_hours
 
     # -------------------------------------------------------------------- files
