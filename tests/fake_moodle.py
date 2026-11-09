@@ -114,7 +114,7 @@ class FakeMoodle:
             cards = "".join(
                 f"<div class='card course-card'><a href='/course/view.php?id={cid}'><img alt=''></a>"
                 f"<a class='aalink coursename' href='/course/view.php?id={cid}'>"
-                f"<span class='sr-only'>Course name</span> {name}</a>"
+                f"<span class='sr-only'>Course name</span> FL-26-CS{300 + cid}-CB</a>"
                 f"<div class='text-muted'>Course category: BSCS</div></div>"
                 for cid, name in fake.courses.items()
             )
@@ -136,7 +136,7 @@ class FakeMoodle:
                     f"<div class='activity-item'><a href='/mod/{a['mod']}/view.php?id={cmid}' class='aalink'>"
                     f"<span class='instancename'>{a['name']} <span class='accesshide'> {label}</span></span></a>{dates}</div></li>"
                 )
-            body = (f"<h1>{fake.courses[cid]}</h1><ul class='topics'><li class='section course-section'>"
+            body = (f"<div class='page-header-headings'><h1>{fake.courses[cid]}</h1></div><ul class='topics'><li class='section course-section'>"
                     f"<h3 class='sectionname'>Week 1</h3><ul class='section'>{''.join(items)}</ul></li></ul>")
             return fake._page(body, fake.courses[cid])
 

@@ -79,9 +79,11 @@ class LmsService:
             self._session_ok()
             for course in courses:
                 self.repo.upsert_course(course)
+                stored = self.repo.course(course["id"])
+                if stored:
+                    course["name"] = stored["name"]   # full name learned earlier from the course page
             self.repo.deactivate_missing_courses(c["id"] for c in courses)
             result.courses = len(courses)
-            result.course_names = [c["name"] for c in courses]
 
             for course in courses:
                 try:
@@ -95,9 +97,14 @@ class LmsService:
                     log.exception("Course sync failed for %s", course["name"])
                     result.error = f"{course['name']}: {error}"
                     continue
+                title = course.get("page_title")
+                if title and title != course["name"] and (" " in title or " " not in course["name"]):
+                    self.repo.set_course_title(course["id"], title)
+                    course["name"] = title
                 result.activities += stats["activities"]
                 result.new_activities += stats["new"]
                 result.changes += stats["changes"]
+            result.course_names = [c["name"] for c in courses]
             result.ok = True
         except SessionExpired as error:
             result.error = str(error)

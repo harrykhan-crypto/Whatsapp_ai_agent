@@ -102,9 +102,11 @@ class Repository:
         with self.db.transaction() as conn:
             existing = conn.execute("SELECT id FROM courses WHERE id = ?", (course["id"],)).fetchone()
             if existing:
+                # Keep a full name learned from the course page when the list only shows the code.
                 conn.execute(
-                    "UPDATE courses SET name = ?, url = ?, active = 1, last_seen = ? WHERE id = ?",
-                    (course["name"], course["url"], stamp, course["id"]),
+                    "UPDATE courses SET name = CASE WHEN short_name IS NOT NULL AND short_name = ? THEN name ELSE ? END,"
+                    " url = ?, active = 1, last_seen = ? WHERE id = ?",
+                    (course["name"], course["name"], course["url"], stamp, course["id"]),
                 )
                 return False
             conn.execute(
@@ -112,6 +114,19 @@ class Repository:
                 (course["id"], course["name"], course.get("short_name"), course["url"], stamp, stamp),
             )
             return True
+
+    def set_course_title(self, course_id: int, full_name: str) -> None:
+        """Store the full course name; the previous (code-like) name becomes the short name."""
+        with self.db.transaction() as conn:
+            row = conn.execute("SELECT name, short_name FROM courses WHERE id = ?", (course_id,)).fetchone()
+            if not row or row["name"] == full_name:
+                return
+            short = row["short_name"] or row["name"]
+            conn.execute("UPDATE courses SET name = ?, short_name = ? WHERE id = ?", (full_name, short, course_id))
+
+    def course(self, course_id: int) -> dict | None:
+        row = self.db.query_one("SELECT * FROM courses WHERE id = ?", (course_id,))
+        return dict(row) if row else None
 
     def deactivate_missing_courses(self, seen_ids: Iterable[int]) -> None:
         ids = list(seen_ids)
