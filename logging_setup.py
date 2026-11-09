@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import re
+import sys
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
@@ -39,7 +40,17 @@ class RedactFilter(logging.Filter):
         return True
 
 
+def force_utf8_console() -> None:
+    """Windows consoles often use cp1252 and crash on emoji; switch to UTF-8 safely."""
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, ValueError):
+            pass
+
+
 def setup_logging(log_dir: Path, secrets: list[str] | None = None, level: int = logging.INFO) -> None:
+    force_utf8_console()
     log_dir.mkdir(parents=True, exist_ok=True)
     fmt = logging.Formatter("%(asctime)s %(levelname)-7s %(name)s: %(message)s")
     redact = RedactFilter(secrets)
