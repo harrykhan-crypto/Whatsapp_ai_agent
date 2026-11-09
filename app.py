@@ -74,7 +74,11 @@ def build(settings: Settings = default_settings, *, messenger: Messenger | None 
     if lms is not None:
         lms.on_session_expired = notifier.session_expired
         lms.on_session_restored = notifier.session_restored
-    allowed = settings.allowed_numbers or ([settings.recipient_number] if settings.whatsapp_provider == "cloud" and settings.recipient_number else [])
+    # The allow-list only applies to the Cloud API (phone numbers). The Agent Platform
+    # identifies you as "user:<id>" and only ever delivers messages from you anyway.
+    allowed: list[str] = []
+    if settings.whatsapp_provider == "cloud":
+        allowed = settings.allowed_numbers or ([settings.recipient_number] if settings.recipient_number else [])
     messages = MessageHandler(commands, messenger, allowed_senders=allowed)
     scheduler = Scheduler(settings, db, repo, lms, notifier)
     return Container(settings, db, repo, worker, lms, reports, commands, messenger, notifier, messages, scheduler)
@@ -199,19 +203,32 @@ def main() -> None:
 
     signal.signal(signal.SIGTERM, shutdown)
     try:
-        c.worker.start()
-        print("\nHARRY opened Moodle in a browser window.")
-        print("If Moodle asks you to log in, sign in yourself in that window and keep it open.")
-        status = c.lms.session_status()
-        if status["signed_in"]:
-            print("✅ Moodle session is active.")
-        else:
-            print("⚠️  Moodle is showing the login page. Sign in in the browser window; HARRY will retry automatically.")
-        start_agent_poller(c, stop)
+        # WhatsApp first: HARRY must answer even if the browser has a problem.
+        if c.messenger.name == "console":
+            print("\n⚠️  WHATSAPP_PROVIDER=console: replies are printed here, NOT sent to WhatsApp. "
+                  "Set WHATSAPP_PROVIDER=agent in .env to use WhatsApp.")
+        elif start_agent_poller(c, stop):
+            print("\n📱 WhatsApp: listening for your messages (send 'menu' to your HARRY agent).")
+        elif c.messenger.name == "cloud":
+            print("\n📱 WhatsApp Cloud API: waiting for webhook calls on /webhook.")
+
+        try:
+            c.worker.start()
+            print("HARRY opened Moodle in a browser window.")
+            print("If Moodle asks you to log in, sign in yourself in that window and keep it open.")
+            status = c.lms.session_status()
+            if status["signed_in"]:
+                print("✅ Moodle session is active.")
+            else:
+                print("⚠️  Moodle is showing the login page. Sign in in the browser window; HARRY will retry automatically.")
+        except Exception as error:  # noqa: BLE001 - keep WhatsApp running; the browser retries on the next job
+            log.error("Browser problem at startup: %s", error)
+            print(f"⚠️  The Moodle browser could not start yet ({error}). HARRY keeps running and will retry.")
         if s.enable_scheduler:
             c.scheduler.start()
         app = create_app(c)
         print(f"Local API: http://{s.host}:{s.port}  (WhatsApp provider: {c.messenger.name})")
+        print("Keep this window open. Press Ctrl+C to stop.\n")
         # threaded=True is safe: every browser action runs on the single browser thread.
         app.run(host=s.host, port=s.port, debug=False, threaded=True, use_reloader=False)
     except KeyboardInterrupt:

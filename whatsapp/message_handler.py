@@ -39,9 +39,9 @@ class MessageHandler:
             log.info("Ignoring duplicate message %s", message_id)
             return None
         if not self.is_allowed(sender):
-            log.warning("Ignoring message from a number that is not allowed")
+            log.warning("Ignoring a WhatsApp message from %s: not in WHATSAPP_ALLOWED_NUMBERS", sender)
             return None
-        log.info("Inbound WhatsApp message (%s chars)", len(text or ""))
+        log.info("📩 WhatsApp message received: %r", (text or "")[:80])
 
         def progress(message: str) -> None:
             try:
@@ -51,6 +51,7 @@ class MessageHandler:
 
         result = self.commands.handle(text or "", progress=progress)
         self.deliver(result, sender)
+        log.info("📤 Replied with %s message(s)", len(result.replies))
         return result
 
     def deliver(self, result: HandlerResult, to: str | None) -> None:

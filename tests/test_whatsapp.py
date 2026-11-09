@@ -240,3 +240,21 @@ def test_log_redaction():
     f.filter(record)
     text = record.getMessage()
     assert "abc.def" not in text and "xyz" not in text and "s3cr3t" not in text and "super-secret-token" not in text
+
+
+def test_agent_provider_ignores_phone_allow_list(tmp_path):
+    """Regression: a phone number in WHATSAPP_ALLOWED_NUMBERS must not silence the Agent Platform."""
+    from app import build
+    from whatsapp.client import ConsoleMessenger
+
+    settings = Settings(database_path=tmp_path / "a.db", download_dir=tmp_path / "d", backup_dir=tmp_path / "b",
+                        log_dir=tmp_path / "l", profile_dir=tmp_path / "p", whatsapp_provider="agent",
+                        allowed_numbers=["923001234567"], recipient_number="923001234567")
+    messenger = ConsoleMessenger()
+    c = build(settings, messenger=messenger, with_browser=False)
+    assert c.messages.handle_inbound("user:5", "/help", "a1") is not None
+    assert "HARRY commands" in messenger.sent[-1]["body"]
+    cloud = build(Settings(database_path=tmp_path / "c.db", whatsapp_provider="cloud", log_dir=tmp_path / "l",
+                           download_dir=tmp_path / "d", backup_dir=tmp_path / "b", profile_dir=tmp_path / "p",
+                           allowed_numbers=["923001234567"]), messenger=ConsoleMessenger(), with_browser=False)
+    assert cloud.messages.handle_inbound("923339999999", "/help", "c1") is None
