@@ -83,3 +83,34 @@ def test_ambiguous_course():
     i = p("software assignments")
     assert i.course_id is None and len(i.ambiguous_courses) == 2
     assert p("software quality assignments").course_id == 105
+
+
+@pytest.mark.parametrize("text, action, checks", [
+    ("overdue files bhejo sirf", "download", dict(overdue_only=True, categories=[])),
+    ("sirf overdue assignments ki files bhejo", "download", dict(overdue_only=True, categories=["assignment"])),
+    ("late assignments ki files", "download", dict(overdue_only=True)),
+    ("jo assignments miss ho gayi unki files bhejo", "download", dict(overdue_only=True, terms=[])),
+    ("kon si assignments late hain", "overdue", dict(terms=[])),
+    ("pending files bhejo", "download", dict(pending_only=True)),
+    ("sirf quizzes batao", "query", dict(categories=["quiz"], terms=[])),
+    ("only labs", "query", dict(categories=["lab"], terms=[])),
+    ("aaj ki files bhejo", "download", dict(period="today")),
+    ("kal wali assignment ki file", "download", dict(period="tomorrow", categories=["assignment"])),
+    ("is hafte ki files", "download", dict(period="week")),
+    ("upcoming quizzes ki files", "download", dict(period="upcoming", categories=["quiz"])),
+    ("HCI ka overdue kaam", "overdue", dict(course_id=103)),
+    ("OS ki sari files", "download", dict(course_id=102, all_items=True)),
+    ("latest file bhejo", "download", dict(latest=True)),
+    ("last assignment ki file", "download", dict(latest=True, categories=["assignment"], terms=[])),
+    ("submitted assignments dikhao", "query", dict(done_only=True, terms=[])),
+    ("kal kitne quiz hain", "query", dict(period="tomorrow", categories=["quiz"], terms=[])),
+    ("what is due this week", "query", dict(period="week")),
+    ("show me assignments upcoming", "query", dict(period="upcoming", categories=["assignment"])),
+    ("aane wale quizzes", "query", dict(period="upcoming", categories=["quiz"])),
+    ("koi nayi announcement", "announcements", dict(terms=[])),
+])
+def test_many_phrasings(text, action, checks):
+    i = p(text)
+    assert i.action == action, (text, i)
+    for key, value in checks.items():
+        assert getattr(i, key) == value, (text, key, getattr(i, key))

@@ -281,3 +281,28 @@ def test_10_fast_answers_and_files_while_syncing(system):
     sent = {d["filename"] for d in documents(messenger, start)}
     assert {"HCI_Assignment_2.pdf", "HCI_Template.docx"} <= sent and all(n.startswith("HCI_") for n in sent)
     sync_thread.join(timeout=300)
+
+
+def test_11_exact_file_selection(system):
+    """'sirf overdue files' must send ONLY overdue work's files, etc."""
+    c, fake, messenger = system
+
+    def ask(text, mid):
+        start = len(messenger.sent)
+        c.messages.handle_inbound("user:1", text, mid)
+        return {d["filename"] for d in documents(messenger, start)}, bodies(messenger, start)
+
+    names, _ = ask("overdue files bhejo sirf", "x1")
+    assert names == {"SCD_Lab_4.zip"}                      # Lab Report 4 is the only overdue work with a file
+    names, _ = ask("kal wali assignment ki file", "x2")
+    assert names == {"HCI_Assignment_2.pdf", "HCI_Template.docx"}
+    names, _ = ask("OS ki sari files", "x3")
+    assert names == {"OS_Lab_3.docx"}
+    names, _ = ask("latest file bhejo", "x4")
+    assert len(names) >= 1
+    names, text = ask("sirf quizzes batao", "x5")
+    assert "Quiz 2" in text and "Assignment 2" not in text and not names
+    names, text = ask("submitted assignments dikhao", "x6")
+    assert "Human Computer Interaction — Assignment 1" in text and "Psychology Assignment 1" not in text
+    names, text = ask("blah blah HCI assignment 2 ki file bhejo yaar jaldi", "x7")
+    assert names == {"HCI_Assignment_2.pdf", "HCI_Template.docx"}   # stray words don't break it

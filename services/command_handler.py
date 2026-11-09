@@ -62,6 +62,7 @@ class CommandHandler:
         progress = progress or (lambda _msg: None)
         try:
             intent = nlu.parse(text, self.repo.courses())
+            intent.terms = self._meaningful_terms(intent.terms)
             log.info("Intent: action=%s period=%s cats=%s course=%s pending=%s files=%s terms=%s",
                      intent.action, intent.period, intent.categories, intent.course_name,
                      intent.pending_only, intent.want_files, intent.terms)
@@ -142,6 +143,12 @@ class CommandHandler:
             result.text(self._files_list(intent.course_id))
         elif action == "download":
             self._download(intent, result, progress)
+        elif action == "query" and intent.done_only:
+            from whatsapp.formatter import format_list
+            done = [a for a in self.reports.select(period=intent.period, categories=intent.categories,
+                                                   course_id=intent.course_id) if a.done]
+            title = "✅ *SUBMITTED / COMPLETED*" + (f"\n📘 {intent.course_name}" if intent.course_name else "")
+            result.text(format_list(title, done, empty="Nothing completed found yet."))
         elif action == "query":
             if intent.terms or intent.numbers:
                 matches = self._search_activities(intent, categories=intent.categories or None)
@@ -161,6 +168,21 @@ class CommandHandler:
             )
 
     # ---------------------------------------------------------------- helpers
+    def _meaningful_terms(self, terms: list[str]) -> list[str]:
+        """Keep only words that appear in your activity or file names, so stray words never block an answer."""
+        if not terms:
+            return []
+        vocab: set[str] = set()
+        for a in self.repo.activities(categories=None):
+            vocab.update(re.findall(r"[a-z]{3,}", a.name.lower()))
+        for f in self.repo.all_files():
+            vocab.update(re.findall(r"[a-z]{3,}", f["filename"].lower()))
+        kept = []
+        for term in terms:
+            if term in vocab or (len(term) >= 4 and any(w.startswith(term) or term.startswith(w) for w in vocab if len(w) >= 4)):
+                kept.append(term)
+        return kept
+
     def _greeting(self, intent: nlu.Intent) -> str:
         name = f" {self.student_name}" if self.student_name else ""
         if re.search(r"assalam|salam|aoa", intent.raw, re.I):
@@ -318,10 +340,33 @@ class CommandHandler:
         where = f" in {intent.course_name}" if intent.course_name else ""
         activities: list[Activity] = []
 
-        if intent.pending_only or intent.overdue_only:
-            activities = self.reports.select(categories=tracked, course_id=intent.course_id,
+        what = " & ".join(categories) + "s" if categories else "work"
+        if intent.overdue_only or intent.pending_only:
+            # "sirf overdue files" -> ONLY overdue work; "pending files" -> everything not submitted yet.
+            activities = self.reports.select(categories=tracked, course_id=intent.course_id, period=intent.period,
                                              pending_only=True, overdue_only=intent.overdue_only)
-            label = ("overdue " if intent.overdue_only else "pending ") + (" & ".join(categories) + "s" if categories else "work")
+            label = ("overdue " if intent.overdue_only else "pending ") + what
+        elif intent.period and not specific:
+            activities = self.reports.select(categories=tracked, course_id=intent.course_id, period=intent.period,
+                                             include_done=not intent.pending_only)
+            label = {"today": "work due today", "tomorrow": "work due tomorrow", "day_after": "work due the day after tomorrow",
+                     "week": "work due in the next 7 days", "next_week": "work due next week",
+                     "upcoming": "upcoming work", "month": "work due this month"}.get(intent.period, "matching work")
+            if categories:
+                label = label.replace("work", what)
+        elif intent.latest and not specific:
+            recent = self._with_files(self.repo.activities(categories=categories or None, course_id=intent.course_id))
+            recent.sort(key=lambda a: (a.first_seen or "", a.opens_at or now()), reverse=True)
+            activities = recent[:1]
+            label = "the latest " + (what if categories else "activity with a file")
+        elif intent.all_items and not specific and (intent.course_id or categories):
+            activities = self._with_files(self.repo.activities(categories=categories or None, course_id=intent.course_id))
+            activities.sort(key=lambda a: (a.deadline is None, a.deadline or now()))
+            label = f"all {what}" if categories else "all activities"
+            if sum(len(self.repo.files_for_activity(a.id)) for a in activities) > MAX_FILES_PER_REQUEST:
+                result.text("📂 That's a lot of files, so here is the full list. Send /download <code> for the ones you want.\n\n"
+                            + self._files_list(intent.course_id))
+                return
         elif specific:
             activities = self._search_activities(intent, categories=(categories + ["resource"]) if categories else None)
             label = "matching activities"
