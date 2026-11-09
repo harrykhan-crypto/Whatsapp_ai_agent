@@ -13,7 +13,7 @@ from database.models import Activity, Repository
 from lms import announcement_scraper, assignment_scraper, file_downloader, quiz_scraper
 from lms.activity_detector import discover_course_activities
 from lms.authentication import SessionExpired, check_session
-from lms.browser import BrowserSession, BrowserWorker
+from lms.browser import PRIORITY_BACKGROUND, PRIORITY_USER, BrowserSession, BrowserWorker
 from lms.course_scraper import get_courses
 from timeutil import from_iso, human_when, now
 
@@ -73,7 +73,7 @@ class LmsService:
         baseline = self.repo.activity_count() == 0
         result = SyncResult(ok=False, baseline=baseline)
         try:
-            courses = self.worker.call(get_courses, timeout=300)
+            courses = self.worker.call(get_courses, timeout=300, priority=PRIORITY_BACKGROUND)
             if not courses:
                 raise RuntimeError("No enrolled courses were visible on the Moodle dashboard.")
             self._session_ok()
@@ -87,10 +87,7 @@ class LmsService:
 
             for course in courses:
                 try:
-                    stats = self.worker.call(
-                        lambda session, c=course: self._sync_course(session, c, baseline, force_details),
-                        timeout=1200,
-                    )
+                    stats = self._sync_course(course, baseline, force_details)
                 except SessionExpired:
                     raise
                 except Exception as error:  # noqa: BLE001 - one bad course must not stop the others
@@ -136,36 +133,49 @@ class LmsService:
         elif self.repo.get_pref("session_state") is None:
             self.repo.set_pref("session_state", "ok")
 
-    # Runs on the browser thread.
-    def _sync_course(self, session: BrowserSession, course: dict, baseline: bool, force: bool) -> dict:
+    def _bg(self, fn, timeout: float = 300):
+        """Run one small browser job at background priority (user requests go first)."""
+        return self.worker.call(fn, timeout=timeout, priority=PRIORITY_BACKGROUND)
+
+    @staticmethod
+    def _scrape_details(session: BrowserSession, item: dict) -> dict:
+        modname, category = item["modname"], item["category"]
+        if modname == "assign":
+            return assignment_scraper.scrape_assignment(session, item["url"])
+        if modname == "quiz":
+            return quiz_scraper.scrape_quiz(session, item["url"])
+        if category in ("lab", "task"):
+            return quiz_scraper.scrape_generic(session, item["url"])
+        if modname in ("resource", "folder"):
+            return {"files": file_downloader.resolve_resource_files(session, item["url"])}
+        return {}
+
+    def _needs_details(self, item: dict, force: bool) -> bool:
+        if item["modname"] in ("resource", "folder"):
+            return force or self.repo.needs_detail_check(item["url"], RESOURCE_REFRESH_HOURS)
+        if item["modname"] in ("assign", "quiz") or item["category"] in ("lab", "task"):
+            return force or self.repo.needs_detail_check(item["url"], DETAIL_REFRESH_HOURS)
+        return False
+
+    def _sync_course(self, course: dict, baseline: bool, force: bool) -> dict:
+        """Sync one course as many small browser jobs, so WhatsApp requests never wait long."""
         stats = {"activities": 0, "new": 0, "changes": 0}
-        discovered = discover_course_activities(session, course)
+        discovered = self._bg(lambda session: discover_course_activities(session, course))
         forums = [a for a in discovered if a["modname"] == "forum"]
         announcement_forums = [f for f in forums if ANNOUNCEMENT_FORUM_RE.search(f["name"])] or forums[:1]
 
         for item in discovered:
-            modname, category = item["modname"], item["category"]
+            category = item["category"]
             details: dict = {}
             checked = False
-            try:
-                if modname == "assign" and (force or self.repo.needs_detail_check(item["url"], DETAIL_REFRESH_HOURS)):
-                    details = assignment_scraper.scrape_assignment(session, item["url"])
+            if self._needs_details(item, force):
+                try:
+                    details = self._bg(lambda session, it=item: self._scrape_details(session, it))
                     checked = True
-                elif modname == "quiz" and (force or self.repo.needs_detail_check(item["url"], DETAIL_REFRESH_HOURS)):
-                    details = quiz_scraper.scrape_quiz(session, item["url"])
-                    checked = True
-                elif category in ("lab", "task") and (force or self.repo.needs_detail_check(item["url"], DETAIL_REFRESH_HOURS)):
-                    details = quiz_scraper.scrape_generic(session, item["url"])
-                    checked = True
-                elif modname in ("resource", "folder") and (
-                    force or self.repo.needs_detail_check(item["url"], RESOURCE_REFRESH_HOURS)
-                ):
-                    details = {"files": file_downloader.resolve_resource_files(session, item["url"])}
-                    checked = True
-            except SessionExpired:
-                raise
-            except Exception as error:  # noqa: BLE001
-                log.warning("Could not read %s (%s): %s", item["name"], item["url"], error)
+                except SessionExpired:
+                    raise
+                except Exception as error:  # noqa: BLE001
+                    log.warning("Could not read %s (%s): %s", item["name"], item["url"], error)
 
             files = details.pop("files", [])
             for key, value in item.get("course_page_dates", {}).items():
@@ -188,14 +198,36 @@ class LmsService:
 
         for forum in announcement_forums:
             try:
-                self._sync_announcements(session, course, forum, baseline)
+                self._sync_announcements(course, forum, baseline)
             except SessionExpired:
                 raise
             except Exception as error:  # noqa: BLE001
                 log.warning("Could not read forum %s: %s", forum["name"], error)
 
         self.repo.deactivate_missing_activities(course["id"], [a["url"] for a in discovered])
+        self._predownload(course["id"])
         return stats
+
+    def _predownload(self, course_id: int) -> None:
+        """Download assignment/lab/task/quiz attachments ahead of time so WhatsApp requests are instant."""
+        for f in self.repo.all_files(course_id):
+            if f.get("category") not in ("assignment", "lab", "task", "quiz"):
+                continue
+            if f.get("local_path") and Path(f["local_path"]).exists():
+                continue
+            try:
+                self.download_file(f["id"], priority=PRIORITY_BACKGROUND)
+            except SessionExpired:
+                raise
+            except Exception as error:  # noqa: BLE001
+                log.info("Pre-download skipped for %s: %s", f["filename"], error)
+
+    def sync_in_background(self) -> bool:
+        """Start a sync without waiting for it. Returns False if one is already running."""
+        if self.syncing:
+            return False
+        threading.Thread(target=self.sync, name="background-sync", daemon=True).start()
+        return True
 
     def _record_events(self, course: dict, item: dict, activity_id: int, changes: list[dict],
                        new_files: list[str], is_new: bool, baseline: bool) -> None:
@@ -227,18 +259,21 @@ class LmsService:
             self.repo.add_event("new_file", f"{course_short} — {item['name']}", "New file(s): " + ", ".join(new_files[:5]),
                                 activity_id=activity_id, course_id=course["id"], notified=baseline)
 
-    def _sync_announcements(self, session: BrowserSession, course: dict, forum: dict, baseline: bool) -> None:
+    def _sync_announcements(self, course: dict, forum: dict, baseline: bool) -> None:
         course_short = course["name"].split(" (", 1)[0]
-        for discussion in announcement_scraper.list_discussions(session, forum["url"], limit=8):
+        discussions = self._bg(lambda session: announcement_scraper.list_discussions(session, forum["url"], limit=8))
+        for discussion in discussions:
             ann_id, is_new = self.repo.add_announcement({
                 **discussion, "course_id": course["id"], "forum_name": forum["name"],
             })
             if not is_new:
                 continue
             try:
-                info = announcement_scraper.read_discussion(session, discussion["url"])
+                info = self._bg(lambda session, d=discussion: announcement_scraper.read_discussion(session, d["url"]))
                 self.repo.update_announcement(ann_id, info["excerpt"], info["author"])
                 excerpt = info["excerpt"][:400]
+            except SessionExpired:
+                raise
             except Exception as error:  # noqa: BLE001
                 log.info("Could not read discussion %s: %s", discussion["url"], error)
                 excerpt = ""
@@ -246,7 +281,7 @@ class LmsService:
                                 course_id=course["id"], notified=baseline)
 
     # ------------------------------------------------------------- downloads
-    def download_file(self, file_id: int) -> dict:
+    def download_file(self, file_id: int, priority: int = PRIORITY_USER) -> dict:
         """Return a local copy of a Moodle file, downloading it if needed."""
         record = self.repo.file(file_id)
         if not record:
@@ -265,7 +300,7 @@ class LmsService:
             )
 
         try:
-            info = self.worker.call(job, timeout=300)
+            info = self.worker.call(job, timeout=300, priority=priority)
         except SessionExpired:
             self._session_expired()
             raise

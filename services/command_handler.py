@@ -168,28 +168,31 @@ class CommandHandler:
         return f"Hello{name}! 👋"
 
     def _ensure_fresh(self, result: HandlerResult, progress) -> bool:
+        """Answer from saved data immediately; refresh in the background when it is getting old.
+
+        Only the very first time (no data saved yet) do we wait for the LMS.
+        """
         if self.lms is None:
             return True
-        if self.repo.get_pref("session_state") == "expired":
-            # Try once: the student may have logged in again since.
-            progress("⏳ Re-checking your Moodle login…")
-            outcome = self.lms.sync()
-            if not outcome.ok:
-                result.text(SESSION_EXPIRED_TEXT if outcome.session_expired else f"⚠️ LMS sync failed: {outcome.error}")
-                return False
-            return True
         age = self.lms.data_age_minutes()
-        if age is None or age > self.stale_minutes:
-            progress("⏳ Checking your LMS for the latest information… (1–3 minutes)")
+        if age is None:
+            progress("⏳ First-time LMS read in progress — this happens only once and takes a few minutes. "
+                     "I'll answer as soon as it's done.")
             outcome = self.lms.sync()
             if outcome.session_expired:
                 result.text(SESSION_EXPIRED_TEXT)
                 return False
-            if not outcome.ok and age is None:
+            if not outcome.ok and self.lms.data_age_minutes() is None:
                 result.text(f"⚠️ I couldn't read your LMS yet: {outcome.error}")
                 return False
-            if not outcome.ok:
-                result.text("⚠️ The LMS could not be refreshed just now; showing the last saved information.")
+            return True
+        if self.repo.get_pref("session_state") == "expired":
+            self.lms.sync_in_background()   # notices automatically when you have logged in again
+            result.text("🔐 Your Moodle login has expired, so this is the last saved information. "
+                        "Log in again in the HARRY browser window on your PC.")
+            return True
+        if age > self.stale_minutes:
+            self.lms.sync_in_background()
         return True
 
     def _status(self) -> str:
@@ -281,6 +284,23 @@ class CommandHandler:
         best.sort(key=lambda a: (a.done, a.deadline is None, a.deadline or now()), reverse=False)
         return best
 
+    def _with_files(self, activities: list[Activity]) -> list[Activity]:
+        return [a for a in activities if self.repo.files_for_activity(a.id)]
+
+    def _search_files(self, intent: nlu.Intent) -> list[dict]:
+        """Match words/numbers directly against file names (e.g. 'lecture 5 slides')."""
+        matches = []
+        for f in self.repo.all_files(intent.course_id):
+            name = f["filename"].lower()
+            numbers = {str(int(n)) for n in re.findall(r"\d+", name)}
+            if intent.numbers and not all(n in numbers for n in intent.numbers):
+                continue
+            if intent.terms and not any(t in name for t in intent.terms):
+                continue
+            if intent.terms or intent.numbers:
+                matches.append(f)
+        return matches
+
     def _download(self, intent: nlu.Intent, result: HandlerResult, progress) -> None:
         argument = intent.argument.strip()
         code = re.fullmatch(r"[fF]?(\d+)", argument) if argument else None
@@ -289,70 +309,75 @@ class CommandHandler:
             if not record:
                 result.text(f"❌ There is no file with code {argument}. Send /files to see the codes.")
                 return
-            self._send_files([record], result, progress, intro=f"Found *{record['filename']}*.")
+            self._send_files([record], result, progress, intro=f"✅ Found *{record['filename']}*. Sending…")
             return
 
-        categories = [c for c in intent.categories] or None
+        categories = list(intent.categories) or None
+        tracked = categories or ["assignment", "quiz", "lab", "task"]
         specific = bool(intent.terms or intent.numbers)
+        where = f" in {intent.course_name}" if intent.course_name else ""
+        activities: list[Activity] = []
+
         if intent.pending_only or intent.overdue_only:
-            activities = self.reports.select(categories=categories, course_id=intent.course_id,
+            activities = self.reports.select(categories=tracked, course_id=intent.course_id,
                                              pending_only=True, overdue_only=intent.overdue_only)
-            label = "pending " + (" & ".join(categories) if categories else "activities")
+            label = ("overdue " if intent.overdue_only else "pending ") + (" & ".join(categories) + "s" if categories else "work")
         elif specific:
-            search_cats = categories + ["resource"] if categories else None
-            activities = self._search_activities(intent, categories=search_cats)
+            activities = self._search_activities(intent, categories=(categories + ["resource"]) if categories else None)
             label = "matching activities"
-        elif intent.course_id:
-            activities = [a for a in self.reports.select(categories=categories, course_id=intent.course_id, pending_only=True)]
-            label = f"pending work in {intent.course_name}"
-            if not any(self.repo.files_for_activity(a.id) for a in activities):
-                result.text(f"ℹ️ No pending {intent.course_name} activity has an attached file. Here are all its files:\n\n"
-                            + self._files_list(intent.course_id))
-                return
-        else:
-            result.text("📂 Which file do you need? Mention the course or activity, e.g. _Send HCI Assignment 2_.\n\n"
-                        + self._files_list(None))
-            return
-
-        if not activities:
-            where = f" in {intent.course_name}" if intent.course_name else ""
-            result.text(f"❌ I couldn't find any {label}{where} on your LMS. Send /files to see every available file.")
-            return
-
-        files: list[dict] = []
-        empty: list[Activity] = []
-        for a in activities[:15]:
-            found = self.repo.files_for_activity(a.id)
-            if not found and self.lms is not None:
+            if len(activities) == 1 and not self.repo.files_for_activity(activities[0].id) and self.lms is not None:
                 try:
-                    self.lms.refresh_activity_files(a)   # the teacher may have just uploaded it
-                    found = self.repo.files_for_activity(a.id)
+                    self.lms.refresh_activity_files(activities[0])   # the teacher may have just uploaded it
                 except SessionExpired:
                     raise
                 except Exception as error:  # noqa: BLE001
-                    log.info("Could not refresh files for %s: %s", a.name, error)
-            if found:
-                for f in found:
-                    f["activity_name"], f["course_name"] = a.name, a.course_name
-                files.extend(found)
+                    log.info("Could not refresh files for %s: %s", activities[0].name, error)
+            if not self._with_files(activities):
+                direct = self._search_files(intent)
+                if direct:
+                    self._send_files(direct[:MAX_FILES_PER_REQUEST], result, progress,
+                                     intro=f"✅ Found {len(direct)} matching file{'s' if len(direct) != 1 else ''}. Sending…")
+                    return
+        else:
+            # Nothing specific: the files you most likely need = nearest pending work (with attachments).
+            pending = self._with_files(self.reports.select(categories=tracked, course_id=intent.course_id, pending_only=True))
+            if pending:
+                activities = pending[:3]
+                label = "your nearest pending work"
             else:
-                empty.append(a)
+                recent = self._with_files(self.repo.activities(categories=categories or None, course_id=intent.course_id))
+                recent.sort(key=lambda a: (a.deadline is not None, a.deadline or now(), a.first_seen or ""), reverse=True)
+                activities = recent[:2]
+                label = "the latest activities"
 
-        if not files:
-            names = "\n".join(f"• {a.short_course} — {a.name}" for a in activities[:8])
-            result.text(f"📭 Found {len(activities)} {label}, but no files are attached to them on the LMS:\n{names}")
+        with_files = self._with_files(activities)
+        if not with_files:
+            if activities:
+                names = "\n".join(f"• {a.short_course} — {a.name}" for a in activities[:8])
+                result.text(f"📭 I found {label}{where}, but the teacher hasn't attached any file to them on the LMS:\n{names}"
+                            "\n\nSend /files to see every file that is available.")
+            else:
+                result.text(f"❌ I couldn't find {label}{where} on your LMS. Send /files to see every available file.")
             return
-        if len(files) > MAX_FILES_PER_REQUEST:
-            result.text(f"ℹ️ {len(files)} files matched; sending the first {MAX_FILES_PER_REQUEST}. Send /files for the full list.")
-            files = files[:MAX_FILES_PER_REQUEST]
-        if len(activities) == 1:
-            a = activities[0]
+
+        files: list[dict] = []
+        for a in with_files:
+            for f in self.repo.files_for_activity(a.id):
+                f["activity_name"], f["course_name"] = a.name, a.course_name
+                files.append(f)
+        total = len(files)
+        files = files[:MAX_FILES_PER_REQUEST]
+        if len(with_files) == 1:
+            a = with_files[0]
             intro = f"✅ Found *{a.short_course} — {a.name}*. Sending {len(files)} file{'s' if len(files) != 1 else ''}…"
         else:
             intro = f"✅ Sending {len(files)} file{'s' if len(files) != 1 else ''} from {label}…"
+        if total > len(files):
+            intro += f"\n(showing {len(files)} of {total}; send /files for the full list)"
         self._send_files(files, result, progress, intro=intro)
-        if empty and len(activities) > 1:
-            result.text("ℹ️ No attachment on LMS for: " + ", ".join(f"{a.short_course} — {a.name}" for a in empty[:6]))
+        missing = [a for a in activities if a not in with_files]
+        if missing and len(activities) > 1:
+            result.text("ℹ️ No attachment on LMS for: " + ", ".join(f"{a.short_course} — {a.name}" for a in missing[:6]))
 
     def _send_files(self, files: list[dict], result: HandlerResult, progress, intro: str) -> None:
         result.text(intro)

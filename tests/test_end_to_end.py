@@ -3,6 +3,7 @@ then WhatsApp commands, file delivery, change notifications, session expiry and
 browser-crash recovery. WhatsApp output goes to ConsoleMessenger."""
 
 import os
+import time
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -202,7 +203,11 @@ def test_06_session_expiry_and_restore(system):
     assert bodies(messenger, start).count("Moodle login needed") == 1
     start = len(messenger.sent)
     c.messages.handle_inbound("user:1", "/today", "s1")
-    assert "Moodle login needed" in bodies(messenger, start)
+    out = bodies(messenger, start)
+    assert "login has expired" in out and "Automata Theory — Assignment 2" in out   # instant answer from saved data
+    deadline = time.time() + 60
+    while c.lms.syncing and time.time() < deadline:   # background re-check started by the message
+        time.sleep(0.2)
     fake.session_valid = True
     start = len(messenger.sent)
     assert c.lms.sync().ok
@@ -238,3 +243,41 @@ def test_09_full_course_names_survive_resync(system):
     rows = {r["id"]: r for r in c.repo.courses()}
     assert rows[101]["name"] == "Automata Theory (CB)" and rows[101]["short_name"] == "FL-26-CS401-CB"
     assert {r["name"] for r in rows.values()} == set(fake.courses.values())
+
+
+def test_10_fast_answers_and_files_while_syncing(system):
+    """Replies must not wait for a running LMS sync, and vague file requests still send real files."""
+    import threading
+
+    c, fake, messenger = system
+    # Assignment/lab attachments were downloaded during sync, ahead of any request.
+    pre = {f["filename"]: f for f in c.repo.all_files() if f.get("category") in ("assignment", "lab")}
+    assert pre["HCI_Assignment_2.pdf"]["local_path"] and Path(pre["HCI_Assignment_2.pdf"]["local_path"]).exists()
+
+    sync_thread = threading.Thread(target=lambda: c.lms.sync(force_details=True))
+    sync_thread.start()
+    deadline = time.time() + 10
+    while not c.lms.syncing and time.time() < deadline:
+        time.sleep(0.05)
+    assert c.lms.syncing
+
+    start, t0 = len(messenger.sent), time.time()
+    c.messages.handle_inbound("user:1", "show me assignments upcoming", "p1")
+    assert time.time() - t0 < 5, "answer waited for the sync"
+    answer = bodies(messenger, start)
+    assert "ASSIGNMENTS" in answer and "Human Computer Interaction — Assignment 2" in answer
+    assert "Lab Report 4" not in answer          # overdue lab is not an upcoming assignment
+
+    start, t0 = len(messenger.sent), time.time()
+    c.messages.handle_inbound("user:1", "give me the file", "p2")
+    docs = documents(messenger, start)
+    assert docs, bodies(messenger, start)
+    assert time.time() - t0 < 30
+    start = len(messenger.sent)
+    c.messages.handle_inbound("user:1", "assignment ki file bhejo", "p3")
+    assert documents(messenger, start)
+    start = len(messenger.sent)
+    c.messages.handle_inbound("user:1", "HCI file", "p4")
+    sent = {d["filename"] for d in documents(messenger, start)}
+    assert {"HCI_Assignment_2.pdf", "HCI_Template.docx"} <= sent and all(n.startswith("HCI_") for n in sent)
+    sync_thread.join(timeout=300)

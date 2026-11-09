@@ -96,7 +96,8 @@ class ReportGenerator:
         what = " & ".join(CATEGORY_TITLES.get(c, c).upper() + ("ZES" if c == "quiz" else "S") for c in categories) or "ACADEMIC WORK"
         title = PERIOD_TITLES.get(period or "", "")
         if period:
-            title = title.replace("DUE", f"{what} DUE") if categories else title
+            if categories:
+                title = title.replace("DUE", f"{what} DUE") if "DUE" in title else title.replace("*UPCOMING*", f"*UPCOMING {what}*")
         else:
             title = f"📋 *{'PENDING ' if pending_only else ''}{what}*"
         if course_name:

@@ -136,7 +136,8 @@ def resolve_resource_files(session: BrowserSession, url: str) -> list[dict]:
     """A mod/resource link usually redirects straight to the file; otherwise read its page."""
     url = session.safe_url(url)
     try:
-        response = session.context.request.get(url, timeout=session.timeout_ms, max_redirects=5)
+        # HEAD follows Moodle's redirect to the file without downloading the file itself.
+        response = session.context.request.head(url, timeout=session.timeout_ms, max_redirects=5)
         final_url = response.url or url
         content_type = (response.headers.get("content-type") or "").lower()
         if response.ok and "text/html" not in content_type and "/pluginfile.php/" in final_url:
