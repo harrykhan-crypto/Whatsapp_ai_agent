@@ -38,6 +38,11 @@ GRADES = {"grade", "grades", "marks", "result", "results", "score", "scores", "g
 ALL_WORK = {"kaam", "kam", "work", "deadline", "deadlines", "due", "submit", "submission", "submissions",
             "jama", "karna", "karni", "dena", "deni", "university", "uni"}
 
+LATEST = {"latest", "last", "recent", "newest", "nayi", "naya", "naye", "nai", "new", "akhri", "aakhri", "abhi-abhi"}
+ALL_ITEMS = {"all", "sab", "sabhi", "saari", "sari", "sare", "saray", "tamam", "poori", "puri", "every", "everything"}
+DONE = {"submitted", "completed", "done", "finished", "chuki", "chuka", "chuke", "kardi", "kar-di"}
+ONLY = {"sirf", "only", "just", "bas", "faqat", "khaali", "khali"}
+
 FILLER = {
     "ka", "ki", "ke", "ko", "se", "me", "mein", "main", "mujhe", "mujay", "mujhy", "muje", "kya", "kia", "hai", "hain",
     "he", "hay", "karo", "kar", "kardo", "kr", "krdo", "do", "dein", "batao", "bata", "btao", "dikhao", "dikha",
@@ -48,7 +53,19 @@ FILLER = {
     "get", "find", "check", "kab", "when", "time", "date", "upar", "ab", "tak", "jo", "jis", "us", "un", "ye",
     "yeh", "wo", "woh", "thoda", "jaldi", "now", "me.", "dear", "sir", "bro", "harry", "bot", "lms", "moodle",
     "hy", "hain?", "bhai", "ji", "g", "k", "o", "alaikum", "assalam", "salam", "aoa", "hi", "hello", "hey",
-    "available", "new", "latest", "nayi", "naya", "naye", "it", "them", "that", "this", "these", "those", "me,",
+    "available", "it", "them", "that", "this", "these", "those", "me,",
+    # more Roman Urdu / English glue words
+    "si", "sa", "se", "ho", "hy", "hai?", "hain", "gayi", "gaya", "gaye", "gai", "gya", "gyi", "unki", "unka", "unke",
+    "inki", "inka", "inke", "iski", "iska", "uski", "uska", "kitne", "kitni", "kitna", "koi", "kuch", "kch", "konsa",
+    "kis", "kya", "kia", "kyun", "kab", "kahan", "dekhao", "dikhao", "dikha", "dekha", "dekho", "batana", "bata",
+    "batain", "bataen", "bataye", "btaen", "mere", "meri", "mera", "hamari", "hamara", "apni", "apna", "apne",
+    "please", "pls", "plz", "zara", "yaar", "yar", "jaan", "bhai", "boss", "sir", "madam", "okay", "ok", "acha",
+    "achha", "theek", "thik", "hai.", "now", "right", "currently", "today's", "how", "many", "much", "there", "any",
+    "can", "you", "could", "would", "will", "shall", "should", "must", "want", "wanna", "need", "needs", "like",
+    "us", "we", "our", "mine", "also", "too", "then", "than", "so", "very", "more", "most", "list", "lists",
+    "kar", "karo", "karna", "karni", "karke", "ke", "kr", "krna", "krni", "krke", "de", "dena", "dedo", "dein",
+    "chahye", "lena", "le", "lo", "lao", "wali", "wala", "wale", "waly", "jo", "jis", "jin", "jab", "tab", "par",
+    "pe", "per", "tak", "liye", "lye", "about", "regarding", "related", "of", "from", "on", "at", "by",
 }
 
 COMMANDS = {
@@ -80,6 +97,9 @@ class Intent:
     terms: list[str] = field(default_factory=list)       # leftover words for activity search
     numbers: list[str] = field(default_factory=list)
     greeting: bool = False
+    latest: bool = False
+    all_items: bool = False
+    done_only: bool = False
     argument: str = ""
     raw: str = ""
 
@@ -216,6 +236,9 @@ def parse(text: str, courses: list[dict] | None = None) -> Intent:
     if token_set & TASK:
         intent.categories.append("task")
 
+    intent.latest = bool(token_set & LATEST)
+    intent.all_items = bool(token_set & ALL_ITEMS)
+    intent.done_only = bool(token_set & DONE) or "ho chuki" in norm or "kar di" in norm or "jama ho" in norm
     intent.pending_only = bool(token_set & PENDING) or "not submitted" in norm or "submit nahi" in norm
     intent.overdue_only = bool(token_set & OVERDUE)
     intent.want_files = bool(token_set & FILES) or (
@@ -260,7 +283,7 @@ def _next_before_week(tokens: list[str]) -> bool:
     return False
 
 
-_VOCAB = (GREETINGS | TODAY | TOMORROW | DAY_AFTER | WEEK | NEXT | THIS | MONTH | ASSIGNMENT | QUIZ | LAB | TASK
+_VOCAB = (LATEST | ALL_ITEMS | DONE | ONLY | GREETINGS | TODAY | TOMORROW | DAY_AFTER | WEEK | NEXT | THIS | MONTH | ASSIGNMENT | QUIZ | LAB | TASK
           | PENDING | OVERDUE | FILES | SEND | COURSES | REPORT | ANNOUNCE | GRADES | ALL_WORK | FILLER)
 
 
