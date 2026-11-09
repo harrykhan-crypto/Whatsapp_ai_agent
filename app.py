@@ -67,8 +67,13 @@ def build(settings: Settings = default_settings, *, messenger: Messenger | None 
         lms = LmsService(worker, repo, download_dir=settings.download_dir,
                          max_download_bytes=settings.max_download_bytes)
     reports = ReportGenerator(repo)
+    ai = None
+    if settings.ai_mode != "off":
+        from services.ai_intent import OllamaIntentParser
+
+        ai = OllamaIntentParser(settings.ollama_url, settings.ollama_model, timeout=settings.ai_timeout)
     commands = CommandHandler(repo, lms, reports, stale_minutes=settings.stale_minutes,
-                              student_name=settings.student_name)
+                              student_name=settings.student_name, ai=ai)
     messenger = messenger or build_messenger(settings, repo)
     notifier = NotificationService(repo, messenger, reports, settings.reminder_hours)
     if lms is not None:
@@ -224,6 +229,11 @@ def main() -> None:
         except Exception as error:  # noqa: BLE001 - keep WhatsApp running; the browser retries on the next job
             log.error("Browser problem at startup: %s", error)
             print(f"⚠️  The Moodle browser could not start yet ({error}). HARRY keeps running and will retry.")
+        if c.commands.ai is not None and c.commands.ai.available():
+            print(f"🧠 Free local AI: ON ({s.ollama_model}) — used when a message isn't understood.")
+        elif s.ai_mode != "off":
+            print(f"🧠 Free local AI: off (optional). Install Ollama from https://ollama.com and run: "
+                  f"ollama pull {s.ollama_model}")
         if s.enable_scheduler:
             c.scheduler.start()
         app = create_app(c)

@@ -90,6 +90,13 @@ class Settings:
     allowed_numbers: list[str] = field(default_factory=lambda: [n.replace("+", "") for n in _list("WHATSAPP_ALLOWED_NUMBERS")])
     student_name: str = field(default_factory=lambda: os.getenv("STUDENT_NAME", ""))
 
+    # --- Free local AI (Ollama) -------------------------------------------
+    # auto = use Ollama when it is running on this PC; off = never
+    ai_mode: str = field(default_factory=lambda: os.getenv("AI_MODE", "auto").strip().lower())
+    ollama_url: str = field(default_factory=lambda: os.getenv("OLLAMA_URL", "http://127.0.0.1:11434"))
+    ollama_model: str = field(default_factory=lambda: os.getenv("OLLAMA_MODEL", "qwen2.5:3b"))
+    ai_timeout: int = field(default_factory=lambda: _int("AI_TIMEOUT", 60))
+
     # --- Web server --------------------------------------------------------
     host: str = field(default_factory=lambda: os.getenv("HOST", "127.0.0.1"))
     port: int = field(default_factory=lambda: _int("PORT", 5000))

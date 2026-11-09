@@ -49,19 +49,26 @@ class HandlerResult:
 
 class CommandHandler:
     def __init__(self, repo: Repository, lms: LmsService | None, reports: ReportGenerator, *,
-                 stale_minutes: int = 45, student_name: str = ""):
+                 stale_minutes: int = 45, student_name: str = "", ai=None):
         self.repo = repo
         self.lms = lms
         self.reports = reports
         self.stale_minutes = stale_minutes
         self.student_name = student_name
+        self.ai = ai   # optional OllamaIntentParser (free local AI)
 
     # ------------------------------------------------------------------ entry
     def handle(self, text: str, progress: Callable[[str], None] | None = None) -> HandlerResult:
         result = HandlerResult()
         progress = progress or (lambda _msg: None)
         try:
-            intent = nlu.parse(text, self.repo.courses())
+            courses = self.repo.courses()
+            intent = nlu.parse(text, courses)
+            if intent.action == "unknown" and self.ai is not None and self.ai.available():
+                progress("🤔 Samajh raha hoon… (thinking)")
+                understood = self.ai.parse(text, courses)   # free local AI, only when the rules don't understand
+                if understood is not None:
+                    intent = understood
             intent.terms = self._meaningful_terms(intent.terms)
             log.info("Intent: action=%s period=%s cats=%s course=%s pending=%s files=%s terms=%s",
                      intent.action, intent.period, intent.categories, intent.course_name,

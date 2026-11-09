@@ -172,6 +172,25 @@ is needed. It can only message you, the agent's creator. Documents up to 16 MB
    be sent. Create a simple utility template and set `WHATSAPP_TEMPLATE_NAME`; HARRY sends
    it automatically to reopen the conversation, then delivers the notification.
 
+## Free local AI (optional): understands any wording
+
+HARRY's built-in rules handle normal English and Roman Urdu. To make it understand
+*any* wording, add a free AI that runs on your own PC (no API key, no cost, offline,
+messages never leave your computer):
+
+1. Install **Ollama** from <https://ollama.com/download> (Windows installer).
+2. In PowerShell (one time, downloads about 2 GB):
+   ```powershell
+   ollama pull qwen2.5:3b
+   ```
+3. Restart HARRY. The window shows `🧠 Free local AI: ON`.
+
+The AI is only asked when the rules don't understand a message. It only works out what
+you mean (which course, which dates, which files); the answer itself always comes from your
+real LMS data. On a normal laptop it takes about 5–20 seconds, and HARRY first sends
+"🤔 Samajh raha hoon…". A smaller, faster model: `ollama pull qwen2.5:1.5b`, then set
+`OLLAMA_MODEL=qwen2.5:1.5b` in `.env`. To turn the AI off, set `AI_MODE=off`.
+
 ## Security
 
 * Login is always done by you in the browser; no password is stored. `get_moodle_token.py`
