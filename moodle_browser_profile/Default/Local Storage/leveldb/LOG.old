@@ -1,0 +1,14 @@
+2026/10/25-18:30:43.610 2684 Reusing MANIFEST C:\Users\Hasnain\Desktop\moodle-whatsapp-agent\moodle_browser_profile\Default\Local Storage\leveldb/MANIFEST-000001
+2026/10/25-18:30:43.671 2684 Recovering log #9
+2026/10/25-18:30:43.678 2684 Reusing old log C:\Users\Hasnain\Desktop\moodle-whatsapp-agent\moodle_browser_profile\Default\Local Storage\leveldb/000009.log 
+2026/10/25-18:32:47.436 3950 Level-0 table #13: started
+2026/10/25-18:32:47.465 3950 Level-0 table #13: 25440 bytes OK
+2026/10/25-18:32:47.479 3950 Delete type=0 #9
+2026/10/25-18:32:47.481 3950 Compacting 4@0 + 0@1 files
+2026/10/25-18:32:47.506 3950 Generated table #14@0: 37 keys, 14320 bytes
+2026/10/25-18:32:47.506 3950 Compacted 4@0 + 0@1 files => 14320 bytes
+2026/10/25-18:32:47.517 3950 compacted to: files[ 0 1 0 0 0 0 0 ]
+2026/10/25-18:32:47.519 3950 Delete type=2 #3
+2026/10/25-18:32:47.519 3950 Delete type=2 #6
+2026/10/25-18:32:47.519 3950 Delete type=2 #10
+2026/10/25-18:32:47.519 3950 Delete type=2 #13
