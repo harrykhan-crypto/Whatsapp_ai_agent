@@ -56,7 +56,8 @@ def run_poller(container, stop: threading.Event) -> None:
             agent.run(stop=stop.is_set)
             backoff = 5
         except AuthenticationError:
-            log.error("WhatsApp Agent API key was rejected. Check WHATSAPP_AGENT_API_KEY in .env.")
+            log.error("WhatsApp Agent API key was REJECTED. Copy the key again from WhatsApp → Settings → "
+                      "Agents → your agent → Chat info → API key into WHATSAPP_AGENT_API_KEY in .env, then restart.")
             stop.wait(300)
         except PollReplacedError:
             log.error("Another program is polling with the same WhatsApp API key "
