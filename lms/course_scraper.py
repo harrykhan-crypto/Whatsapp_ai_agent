@@ -63,7 +63,8 @@ def get_courses(session: BrowserSession) -> list[dict]:
 
     courses = []
     for course_id, candidates in names.items():
-        name = max(candidates, key=candidates.count) if candidates else f"Course {course_id}"
+        # Prefer a real name ("Automata Theory (CB)") over a code ("FL-26-CS310-CB").
+        name = max(candidates, key=lambda n: (" " in n, candidates.count(n), len(n))) if candidates else f"Course {course_id}"
         courses.append({
             "id": course_id,
             "name": name,

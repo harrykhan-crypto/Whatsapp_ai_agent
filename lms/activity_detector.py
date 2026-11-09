@@ -63,10 +63,34 @@ def _collect_modules(session: BrowserSession, course: dict, found: dict[str, dic
         }
 
 
+def read_course_title(session: BrowserSession) -> str:
+    """Full course name from the course page (the course list may show only codes).
+
+    Checks the page heading and the browser tab title ("Course: Automata Theory (CB)")
+    and prefers whichever looks like a real name rather than a code.
+    """
+    candidates = []
+    heading = session.text_of(".page-header-headings h1, #page-header h1, #region-main h1")
+    if heading:
+        candidates.append(heading.split("\n", 1)[0])
+    try:
+        raw = session.page.title() or ""
+    except Exception:  # noqa: BLE001
+        raw = ""
+    raw = re.sub(r"^\s*Course:\s*", "", raw, flags=re.I)
+    candidates.append(raw.split(" | ", 1)[0])
+    cleaned = [re.sub(r"\s+", " ", c).strip()[:160] for c in candidates]
+    cleaned = [c for c in cleaned if c and c.lower() not in {"course", "dashboard", "my courses", "home"}]
+    if not cleaned:
+        return ""
+    return max(cleaned, key=lambda c: (" " in c, len(c)))
+
+
 def discover_course_activities(session: BrowserSession, course: dict) -> list[dict]:
     """Open a course page and return every tracked activity on it."""
     session.open(course["url"])
     require_session(session)
+    course["page_title"] = read_course_title(session)
     found: dict[str, dict] = {}
     _collect_modules(session, course, found)
 

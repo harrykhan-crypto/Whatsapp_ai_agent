@@ -229,3 +229,12 @@ def test_08_http_api(system):
     assert {f["filename"] for f in files["files"]} == {"HCI_Assignment_2.pdf", "HCI_Template.docx"}
     # Requests arriving through a tunnel are refused without the API key.
     assert client.post("/ask", json={"question": "x"}, headers={"X-Forwarded-For": "1.2.3.4"}).status_code == 403
+
+
+def test_09_full_course_names_survive_resync(system):
+    """Abasyn's course list shows codes (FL-26-CS310-CB); full names come from course pages and must stick."""
+    c, fake, _ = system
+    assert c.lms.sync().ok
+    rows = {r["id"]: r for r in c.repo.courses()}
+    assert rows[101]["name"] == "Automata Theory (CB)" and rows[101]["short_name"] == "FL-26-CS401-CB"
+    assert {r["name"] for r in rows.values()} == set(fake.courses.values())
