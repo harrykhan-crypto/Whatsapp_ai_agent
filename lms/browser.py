@@ -43,17 +43,6 @@ _DEAD_BROWSER_MARKERS = (
 
 PRIORITY_USER = 0
 PRIORITY_BACKGROUND = 10
-_BLOCKED_TYPES = {"image", "font", "media"}
-
-
-def _block_heavy_resources(route) -> None:
-    try:
-        if route.request.resource_type in _BLOCKED_TYPES:
-            route.abort()
-        else:
-            route.continue_()
-    except Exception:  # noqa: BLE001 - page may have navigated away
-        pass
 
 
 class BrowserUnavailable(RuntimeError):
@@ -311,6 +300,11 @@ class BrowserWorker:
             accept_downloads=True,
             viewport={"width": 1365, "height": 900},
         )
+        if self.headless:
+            # Faster pages without images. This is done by Chromium itself: nothing may depend on
+            # Python handling requests, because pages also navigate while HARRY is idle (e.g. when you
+            # log in by hand), and such requests would hang forever.
+            options["args"] = ["--blink-settings=imagesEnabled=false"]
         if self.executable_path:
             options["executable_path"] = self.executable_path
         elif self.channel:
@@ -318,11 +312,6 @@ class BrowserWorker:
         self._context = self._playwright.chromium.launch_persistent_context(**options)
         self._context.set_default_timeout(self.timeout_ms)
         self._restore_cookies()
-        # Images, fonts and media are not needed to read Moodle: skipping them makes pages load much faster.
-        try:
-            self._context.route("**/*", _block_heavy_resources)
-        except Exception as error:  # noqa: BLE001
-            log.debug("Resource blocking unavailable: %s", error)
         page = self._context.pages[0] if self._context.pages else self._context.new_page()
         self._session = BrowserSession(self._context, page, self.base_url, self.timeout_ms)
         self.started_at = time.time()

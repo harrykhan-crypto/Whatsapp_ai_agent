@@ -9,6 +9,7 @@ exercised end-to-end without touching the real LMS.
 from __future__ import annotations
 
 import threading
+import time
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -33,6 +34,7 @@ class FakeMoodle:
         self.credentials = ("student01", "Secret#123")
         self.captcha = False
         self.login_attempts = 0
+        self.request_log: list[tuple[float, str]] = []
         self.courses = {
             101: "Automata Theory (CB)",
             102: "Operating System Concepts (CB)",
@@ -93,6 +95,10 @@ class FakeMoodle:
     def _make_app(self) -> Flask:
         app = Flask("fake_moodle")
         fake = self
+
+        @app.before_request
+        def log_request():
+            fake.request_log.append((time.time(), request.full_path))
 
         @app.before_request
         def require_login():
