@@ -53,6 +53,10 @@ class Settings:
     moodle_url: str = field(default_factory=lambda: os.getenv("MOODLE_URL", "https://fall2026.auplmscs.com").rstrip("/"))
     profile_dir: Path = field(default_factory=lambda: _path("BROWSER_PROFILE_DIR", ROOT / "moodle_browser_profile"))
     headless: bool = field(default_factory=lambda: _bool("BROWSER_HEADLESS", False))
+    # Optional: your own Moodle username/password, so HARRY can log in again by itself when the
+    # session ends. Saved by SAVE_LOGIN.bat; never logged or sent anywhere except the Moodle login form.
+    moodle_username: str = field(default_factory=lambda: os.getenv("MOODLE_USERNAME", ""))
+    moodle_password: str = field(default_factory=lambda: os.getenv("MOODLE_PASSWORD", ""))
     # Saved Moodle login (cookies). Default: next to the profile folder.
     session_file: str = field(default_factory=lambda: os.getenv("SESSION_FILE", ""))
     # true when HARRY runs on a cloud server (changes the "login needed" instructions)

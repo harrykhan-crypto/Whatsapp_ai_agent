@@ -98,6 +98,13 @@ class NotificationService:
         alert = SERVER_LOGIN_ALERT if self.server_mode else SESSION_EXPIRED_ALERT
         self.send(f"session_expired:{stamp}", "session_expired", alert, respect_mute=False)
 
+    def login_rejected(self, fingerprint: str) -> None:
+        self.send(f"login_rejected:{fingerprint}", "login_rejected",
+                  "🔐 *HARRY: Moodle rejected your saved password*\n\n"
+                  "Did you change your LMS password? On your laptop, double-click *SAVE_LOGIN.bat* and enter the "
+                  "new one. Until then I won't try the old password again, so your account can't get locked.",
+                  respect_mute=False)
+
     def session_restored(self) -> None:
         stamp = self.repo.get_pref("session_expired_at") or to_iso(now())
         self.send(f"session_restored:{stamp}", "session_restored",

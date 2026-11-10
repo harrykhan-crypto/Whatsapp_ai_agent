@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import re
 import threading
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
@@ -12,7 +14,14 @@ from typing import Callable
 from database.models import Activity, Repository
 from lms import announcement_scraper, assignment_scraper, file_downloader, quiz_scraper
 from lms.activity_detector import discover_course_activities
-from lms.authentication import SessionExpired, check_session
+from lms.authentication import (
+    LoginRejected,
+    ManualLoginRequired,
+    SessionExpired,
+    auto_login,
+    check_session,
+    require_session,
+)
 from lms.browser import PRIORITY_BACKGROUND, PRIORITY_USER, BrowserSession, BrowserWorker
 from lms.course_scraper import get_courses
 from timeutil import from_iso, human_when, now
@@ -38,7 +47,8 @@ class SyncResult:
 
 
 class LmsService:
-    def __init__(self, worker: BrowserWorker, repo: Repository, *, download_dir: Path, max_download_bytes: int):
+    def __init__(self, worker: BrowserWorker, repo: Repository, *, download_dir: Path, max_download_bytes: int,
+                 username: str = "", password: str = ""):
         self.worker = worker
         self.repo = repo
         self.download_dir = Path(download_dir)
@@ -47,10 +57,74 @@ class LmsService:
         self.syncing = False
         self.on_session_expired: Callable[[], None] | None = None
         self.on_session_restored: Callable[[], None] | None = None
+        self.on_login_rejected: Callable[[str], None] | None = None
+        self._login_lock = threading.Lock()
+        self._last_login_attempt = 0.0
+        self._last_login_ok = 0.0
+        self._transient_login_failures = 0
+        self.set_credentials(username, password)
+
+    # ------------------------------------------------------- automatic login
+    def set_credentials(self, username: str, password: str) -> None:
+        self._username, self._password = (username or "").strip(), password or ""
+        self._fingerprint = (hashlib.sha256(f"{self._username}\n{self._password}".encode()).hexdigest()[:16]
+                             if self._username and self._password else "")
+
+    @property
+    def has_credentials(self) -> bool:
+        return bool(self._fingerprint)
+
+    @property
+    def credentials_rejected(self) -> bool:
+        return bool(self._fingerprint) and self.repo.get_pref("login_rejected") == self._fingerprint
+
+    def try_auto_login(self) -> bool:
+        """Log in again with the saved username/password. Never retries a password Moodle rejected."""
+        if not self.has_credentials or self.credentials_rejected:
+            return False
+        with self._login_lock:
+            if time.time() - self._last_login_ok < 60:
+                return True        # another thread just logged in
+            if time.time() - self._last_login_attempt < 120:
+                return False       # at most one attempt per 2 minutes
+            self._last_login_attempt = time.time()
+            try:
+                self.worker.call(lambda s: auto_login(s, self._username, self._password), timeout=180,
+                                 priority=PRIORITY_USER)
+            except LoginRejected as error:
+                log.warning("Moodle rejected the saved password: %s", error)
+                self.repo.set_pref("login_rejected", self._fingerprint)
+                if self.on_login_rejected:
+                    self.on_login_rejected(self._fingerprint)
+                return False
+            except ManualLoginRequired as error:
+                log.warning("Automatic login not possible: %s", error)
+                self._transient_login_failures = 99   # a person is needed: tell them now
+                return False
+            except Exception as error:  # noqa: BLE001 - network problems etc.: try again later
+                log.warning("Automatic login failed: %s", error)
+                self._transient_login_failures += 1
+                return False
+            self._last_login_ok = time.time()
+            self._transient_login_failures = 0
+            log.info("Moodle session renewed automatically")
+            return True
+
+    def _call(self, fn, *, timeout: float, priority: int):
+        """Run a browser job; if Moodle shows the login page, log in again automatically and retry once."""
+        try:
+            return self.worker.call(fn, timeout=timeout, priority=priority)
+        except SessionExpired:
+            if not self.try_auto_login():
+                raise
+            return self.worker.call(fn, timeout=timeout, priority=priority)
 
     # ---------------------------------------------------------------- status
     def session_status(self) -> dict:
-        return self.worker.call(check_session, timeout=120)
+        status = self.worker.call(check_session, timeout=120)
+        if not status["signed_in"] and self.try_auto_login():
+            status = self.worker.call(check_session, timeout=120)
+        return status
 
     def data_age_minutes(self) -> float | None:
         last = self.repo.last_sync()
@@ -73,7 +147,7 @@ class LmsService:
         baseline = self.repo.activity_count() == 0
         result = SyncResult(ok=False, baseline=baseline)
         try:
-            courses = self.worker.call(get_courses, timeout=300, priority=PRIORITY_BACKGROUND)
+            courses = self._call(get_courses, timeout=300, priority=PRIORITY_BACKGROUND)
             if not courses:
                 raise RuntimeError("No enrolled courses were visible on the Moodle dashboard.")
             self._session_ok()
@@ -120,9 +194,14 @@ class LmsService:
         return result
 
     def _session_expired(self) -> None:
+        # A brief network problem during automatic login is retried on the next sync before bothering you.
+        if self.has_credentials and not self.credentials_rejected and self._transient_login_failures < 3:
+            log.info("Login needed; will retry the automatic login on the next sync")
+            return
         if self.repo.get_pref("session_state") != "expired":
             self.repo.set_pref("session_state", "expired")
-            if self.on_session_expired:
+            # A rejected password already produced its own, more specific message.
+            if self.on_session_expired and not self.credentials_rejected:
                 self.on_session_expired()
 
     def _session_ok(self) -> None:
@@ -135,7 +214,7 @@ class LmsService:
 
     def _bg(self, fn, timeout: float = 300):
         """Run one small browser job at background priority (user requests go first)."""
-        return self.worker.call(fn, timeout=timeout, priority=PRIORITY_BACKGROUND)
+        return self._call(fn, timeout=timeout, priority=PRIORITY_BACKGROUND)
 
     @staticmethod
     def _scrape_details(session: BrowserSession, item: dict) -> dict:
@@ -300,7 +379,7 @@ class LmsService:
             )
 
         try:
-            info = self.worker.call(job, timeout=300, priority=priority)
+            info = self._call(job, timeout=300, priority=priority)
         except SessionExpired:
             self._session_expired()
             raise
@@ -314,10 +393,11 @@ class LmsService:
             if activity.modname in ("resource", "folder"):
                 return file_downloader.resolve_resource_files(session, activity.url)
             session.open(activity.url)
+            require_session(session)
             return file_downloader.discover_files(session)
 
         try:
-            files = self.worker.call(job, timeout=180)
+            files = self._call(job, timeout=180, priority=PRIORITY_USER)
         except SessionExpired:
             self._session_expired()
             raise
