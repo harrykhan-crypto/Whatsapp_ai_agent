@@ -22,7 +22,7 @@ from functools import wraps
 
 from flask import Flask, abort, jsonify, request
 
-from config import Settings, settings as default_settings
+from config import Settings, resolve_path, settings as default_settings
 from database.db import Database
 from database.models import Repository
 from lms.browser import BrowserWorker
@@ -63,17 +63,20 @@ def build(settings: Settings = default_settings, *, messenger: Messenger | None 
     if with_browser:
         worker = BrowserWorker(settings.profile_dir, settings.moodle_url, headless=settings.headless,
                                timeout_ms=settings.page_timeout_ms, executable_path=settings.browser_executable,
-                               channel=settings.browser_channel)
+                               channel=settings.browser_channel,
+                               cookie_file=resolve_path(settings.session_file) if settings.session_file else None)
         lms = LmsService(worker, repo, download_dir=settings.download_dir,
-                         max_download_bytes=settings.max_download_bytes)
+                         max_download_bytes=settings.max_download_bytes,
+                         username=settings.moodle_username, password=settings.moodle_password)
     reports = ReportGenerator(repo)
     commands = CommandHandler(repo, lms, reports, stale_minutes=settings.stale_minutes,
-                              student_name=settings.student_name)
+                              student_name=settings.student_name, server_mode=settings.server_mode)
     messenger = messenger or build_messenger(settings, repo)
-    notifier = NotificationService(repo, messenger, reports, settings.reminder_hours)
+    notifier = NotificationService(repo, messenger, reports, settings.reminder_hours, server_mode=settings.server_mode)
     if lms is not None:
         lms.on_session_expired = notifier.session_expired
         lms.on_session_restored = notifier.session_restored
+        lms.on_login_rejected = notifier.login_rejected
     # The allow-list only applies to the Cloud API (phone numbers). The Agent Platform
     # identifies you as "user:<id>" and only ever delivers messages from you anyway.
     allowed: list[str] = []
@@ -192,7 +195,8 @@ def start_agent_poller(c: Container, stop: threading.Event) -> threading.Thread 
 
 def main() -> None:
     s = default_settings
-    setup_logging(s.log_dir, secrets=[s.agent_api_key, s.cloud_token, s.cloud_app_secret, s.cloud_verify_token, s.api_key])
+    setup_logging(s.log_dir, secrets=[s.agent_api_key, s.cloud_token, s.cloud_app_secret, s.cloud_verify_token, s.api_key,
+                                      s.moodle_password])
     log.info("Starting HARRY — Abasyn WhatsApp LMS Intelligence Agent")
     c = build(s)
     stop = threading.Event()
@@ -224,6 +228,10 @@ def main() -> None:
         except Exception as error:  # noqa: BLE001 - keep WhatsApp running; the browser retries on the next job
             log.error("Browser problem at startup: %s", error)
             print(f"⚠️  The Moodle browser could not start yet ({error}). HARRY keeps running and will retry.")
+        if c.lms is not None and c.lms.has_credentials:
+            print("🔑 Automatic Moodle login: ON (HARRY logs in again by itself when the session ends).")
+        else:
+            print("🔑 Automatic Moodle login: off. Double-click SAVE_LOGIN.bat to turn it on.")
         if s.enable_scheduler:
             c.scheduler.start()
         app = create_app(c)

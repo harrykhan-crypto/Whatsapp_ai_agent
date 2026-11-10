@@ -30,6 +30,21 @@ Before `CHECK_HARRY.bat`, send any message (e.g. `menu`) to your HARRY agent on 
 Keep the START_HARRY window and the Moodle browser window open (minimising is fine).
 To stop HARRY, close the START_HARRY window.
 
+## Log in once (automatic re-login)
+
+Double-click **`SAVE_LOGIN.bat`** and type your Moodle username and password. It is checked on
+Moodle and saved in `.env` (on your server too, if you use one). HARRY then signs in again by
+itself whenever Moodle ends the session. After changing your LMS password, run `SAVE_LOGIN.bat`
+again. A wrong password is tried only once (no account lockout), and a CAPTCHA or verification
+code is never bypassed: HARRY asks you to sign in instead. The password never appears in logs or
+WhatsApp messages.
+
+## Run 24/7 for free (laptop off)
+
+See **[docs/FREE_24x7_SERVER.md](docs/FREE_24x7_SERVER.md)**: a free Oracle Cloud server, set up
+with `DEPLOY_TO_SERVER.bat`. When Moodle needs a new login, `LOGIN_AND_SEND.bat` on the laptop
+sends it to the server.
+
 ## Setup (Windows PowerShell, manual)
 
 ```powershell

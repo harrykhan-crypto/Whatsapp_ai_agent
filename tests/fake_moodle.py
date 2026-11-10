@@ -30,6 +30,9 @@ class FakeMoodle:
         now = datetime.now(TZ).replace(second=0, microsecond=0)
         today_end = now.replace(hour=23, minute=59)
         self.session_valid = True
+        self.credentials = ("student01", "Secret#123")
+        self.captcha = False
+        self.login_attempts = 0
         self.courses = {
             101: "Automata Theory (CB)",
             102: "Operating System Concepts (CB)",
@@ -99,11 +102,32 @@ class FakeMoodle:
                 return redirect("/login/index.php")
             return None
 
+        def login_form(error: str = ""):
+            captcha = "<div class='g-recaptcha' data-sitekey='x'></div>" if fake.captcha else ""
+            return fake._page(
+                "<h2>Log in to Learning Management System, Fall 2026</h2>"
+                + (f"<div class='alert alert-danger' id='loginerrormessage'>{error}</div>" if error else "")
+                + "<form method='post' action='/login/index.php' id='login'>"
+                "<input type='hidden' name='logintoken' value='tok'>"
+                "<input id='username' name='username'><input id='password' type='password' name='password'>"
+                + captcha + "<button type='submit' id='loginbtn'>Log in</button></form>",
+                "Log in")
+
         @app.get("/login/index.php")
         def login():
-            return fake._page("<h2>Log in to Learning Management System, Fall 2026</h2>"
-                              "<form method='post'><input name='username'><input type='password' name='password'></form>",
-                              "Log in")
+            return login_form()
+
+        @app.post("/login/index.php")
+        def login_post():
+            fake.login_attempts += 1
+            if fake.captcha:
+                return login_form("Please complete the CAPTCHA")
+            if (request.form.get("username"), request.form.get("password")) != fake.credentials:
+                return login_form("Invalid login, please try again")
+            fake.session_valid = True
+            response = redirect("/my/")
+            response.set_cookie(SESSION_COOKIE, VALID_SESSION)
+            return response
 
         @app.get("/my/")
         def dashboard():

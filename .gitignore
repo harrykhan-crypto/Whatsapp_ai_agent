@@ -14,3 +14,6 @@ logs/
 moodle_downloads/
 .moodle_browser_profile_session.json
 *.tmp
+
+# Server address for DEPLOY_TO_SERVER / LOGIN_AND_SEND (personal)
+deploy/server.local

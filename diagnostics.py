@@ -132,7 +132,8 @@ def whatsapp_checks(c) -> None:
 
 def main() -> int:
     mode = sys.argv[1] if len(sys.argv) > 1 else "all"
-    setup_logging(settings.log_dir, secrets=[settings.agent_api_key, settings.cloud_token, settings.cloud_app_secret])
+    setup_logging(settings.log_dir, secrets=[settings.agent_api_key, settings.cloud_token, settings.cloud_app_secret,
+                                                     settings.moodle_password])
     c = build(settings, with_browser=mode in ("lms", "all"))
     try:
         if mode in ("lms", "all"):

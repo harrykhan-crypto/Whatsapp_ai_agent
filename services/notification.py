@@ -11,6 +11,13 @@ from whatsapp.client import DeliveryError, Messenger
 
 log = logging.getLogger(__name__)
 
+SERVER_LOGIN_ALERT = (
+    "🔐 *HARRY: Moodle login needed*\n\n"
+    "Your Abasyn LMS session has expired, so I can't check your courses right now.\n"
+    "On your laptop, double-click *LOGIN_AND_SEND.bat*, sign in to Moodle in the window that opens, "
+    "and I'll continue automatically on the server (about 2 minutes)."
+)
+
 SESSION_EXPIRED_ALERT = (
     "🔐 *HARRY: Moodle login needed*\n\n"
     "Your Abasyn LMS session has expired, so I can't check your courses right now.\n"
@@ -21,11 +28,12 @@ SESSION_EXPIRED_ALERT = (
 
 class NotificationService:
     def __init__(self, repo: Repository, messenger: Messenger, reports: ReportGenerator,
-                 reminder_hours: list[int] | None = None):
+                 reminder_hours: list[int] | None = None, server_mode: bool = False):
         self.repo = repo
         self.messenger = messenger
         self.reports = reports
         self.reminder_hours = sorted(reminder_hours or [24, 3])
+        self.server_mode = server_mode
 
     @property
     def enabled(self) -> bool:
@@ -87,7 +95,15 @@ class NotificationService:
     def session_expired(self) -> None:
         stamp = to_iso(now())
         self.repo.set_pref("session_expired_at", stamp)
-        self.send(f"session_expired:{stamp}", "session_expired", SESSION_EXPIRED_ALERT, respect_mute=False)
+        alert = SERVER_LOGIN_ALERT if self.server_mode else SESSION_EXPIRED_ALERT
+        self.send(f"session_expired:{stamp}", "session_expired", alert, respect_mute=False)
+
+    def login_rejected(self, fingerprint: str) -> None:
+        self.send(f"login_rejected:{fingerprint}", "login_rejected",
+                  "🔐 *HARRY: Moodle rejected your saved password*\n\n"
+                  "Did you change your LMS password? On your laptop, double-click *SAVE_LOGIN.bat* and enter the "
+                  "new one. Until then I won't try the old password again, so your account can't get locked.",
+                  respect_mute=False)
 
     def session_restored(self) -> None:
         stamp = self.repo.get_pref("session_expired_at") or to_iso(now())
